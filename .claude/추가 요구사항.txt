@@ -1,0 +1,3 @@
+Spectrum 부분과 IQ Data View 를 별도의 GUI 로 분리해서 작성해 주시길
+파라미터나 IP 설정 부분은 화면 좌측에 배치하도록 수정 필요
+Capture 데이터의 응답이 없을 경우 Capturing 을 지속하지 않고 timeout 메시지를 띄워주고, GUI 에는 아무것도 띄우지 않도록 하기

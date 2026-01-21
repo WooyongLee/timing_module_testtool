@@ -1,0 +1,84 @@
+# ----------------------------
+# Flutter / Dart build outputs
+# ----------------------------
+build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# ----------------------------
+# Platform-specific generated code
+# ----------------------------
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/key.properties
+
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+ios/Flutter/App.framework
+ios/Flutter/Generated.xcconfig
+ios/Flutter/flutter_export_environment.sh
+ios/build/
+
+macos/Pods/
+macos/Flutter/ephemeral/
+macos/build/
+
+windows/build/
+windows/flutter/
+windows/runner/GeneratedPluginRegistrant.*
+
+linux/build/
+linux/flutter/
+linux/runner/GeneratedPluginRegistrant.*
+
+web/build/
+web/.dart_tool/
+
+# ----------------------------
+# Generated Dart files
+# ----------------------------
+**/*.g.dart
+**/*.freezed.dart
+**/*.gr.dart
+
+# ----------------------------
+# Cache / logs
+# ----------------------------
+.pub-cache/
+.pub/
+packages/
+coverage/
+*.log
+
+# ----------------------------
+# IDE / editor files
+# ----------------------------
+.idea/
+.vscode/
+*.iml
+
+# ----------------------------
+# Environment / secrets
+# ----------------------------
+.env
+.env.*
+*.keystore
+*.jks
+
+# ----------------------------
+# Assets not relevant to logic
+# ----------------------------
+assets/fonts/
+assets/images/
+assets/icons/
+
+# ----------------------------
+# OS / misc
+# ----------------------------
+.DS_Store
+Thumbs.db
