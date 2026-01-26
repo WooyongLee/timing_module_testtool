@@ -3,7 +3,9 @@ import 'package:provider/provider.dart';
 import '../services/mqtt_service.dart';
 
 class MqttLogPanel extends StatefulWidget {
-  const MqttLogPanel({super.key});
+  final double height;
+
+  const MqttLogPanel({super.key, this.height = 120.0});
 
   @override
   State<MqttLogPanel> createState() => _MqttLogPanelState();
@@ -35,7 +37,7 @@ class _MqttLogPanelState extends State<MqttLogPanel> {
         });
 
         return Container(
-          height: 120,
+          height: widget.height,
           decoration: BoxDecoration(
             color: const Color(0xFF1e1e1e),
             border: Border(top: BorderSide(color: Colors.grey[700]!)),

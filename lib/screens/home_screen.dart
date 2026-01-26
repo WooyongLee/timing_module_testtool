@@ -6,8 +6,17 @@ import '../widgets/spectrum_view.dart';
 import '../widgets/iq_view.dart';
 import '../widgets/mqtt_log_panel.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  double _logPanelHeight = 120.0; // Initial height
+  final double _minLogPanelHeight = 60.0;
+  final double _maxLogPanelHeight = 500.0;
 
   @override
   Widget build(BuildContext context) {
@@ -58,8 +67,40 @@ class HomeScreen extends StatelessWidget {
               ],
             ),
           ),
-          // Bottom MQTT log panel (always visible)
-          const MqttLogPanel(),
+          // Resizable divider
+          MouseRegion(
+            cursor: SystemMouseCursors.resizeUpDown,
+            child: GestureDetector(
+              onVerticalDragUpdate: (details) {
+                setState(() {
+                  _logPanelHeight = (_logPanelHeight - details.delta.dy)
+                      .clamp(_minLogPanelHeight, _maxLogPanelHeight);
+                });
+              },
+              child: Container(
+                height: 6,
+                decoration: BoxDecoration(
+                  color: Colors.grey[800],
+                  border: Border(
+                    top: BorderSide(color: Colors.grey[700]!, width: 1),
+                    bottom: BorderSide(color: Colors.grey[700]!, width: 1),
+                  ),
+                ),
+                child: Center(
+                  child: Container(
+                    width: 40,
+                    height: 3,
+                    decoration: BoxDecoration(
+                      color: Colors.grey[600],
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          // Bottom MQTT log panel (resizable)
+          MqttLogPanel(height: _logPanelHeight),
         ],
       ),
     );

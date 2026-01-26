@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -5,6 +6,8 @@ import '../services/mqtt_service.dart';
 import '../services/app_state.dart';
 import '../services/file_service.dart';
 import '../constants/protocol.dart';
+import '../models/device_status.dart';
+import '../widgets/device_status_dialog.dart';
 
 class ControlPanel extends StatefulWidget {
   const ControlPanel({super.key});
@@ -16,11 +19,17 @@ class ControlPanel extends StatefulWidget {
 class _ControlPanelState extends State<ControlPanel> {
   final _ipController = TextEditingController(text: Protocol.defaultIp);
   final _freqController = TextEditingController(text: '3000');
-  final _captureLengthController = TextEditingController(text: '4096');
+  final _captureLengthController = TextEditingController(text: '16384');
   final _fftLengthController = TextEditingController(text: '8192');
+  final _repeatCountController = TextEditingController(text: '10');
 
   // Track if controllers are initialized
   bool _controllersInitialized = false;
+
+  // Status query subscription and timeout timer
+  StreamSubscription? _statusSubscription;
+  Timer? _statusTimeoutTimer;
+  bool _isLoadingDialogOpen = false;
 
   @override
   void dispose() {
@@ -28,14 +37,18 @@ class _ControlPanelState extends State<ControlPanel> {
     _freqController.dispose();
     _captureLengthController.dispose();
     _fftLengthController.dispose();
+    _repeatCountController.dispose();
+    _statusSubscription?.cancel();
+    _statusTimeoutTimer?.cancel();
     super.dispose();
   }
 
   void _initControllersOnce(AppState appState) {
     if (!_controllersInitialized) {
       _freqController.text = appState.centerFreqMhz.toString();
-      _captureLengthController.text = appState.iqSampleCount.toString();
+      _captureLengthController.text = appState.iqByteSize.toString();
       _fftLengthController.text = appState.fftLength.toString();
+      _repeatCountController.text = appState.repeatCount.toString();
       _controllersInitialized = true;
     }
   }
@@ -73,6 +86,12 @@ class _ControlPanelState extends State<ControlPanel> {
               // Single Request Button (FFT or IQ Capture)
               _buildSection(
                 child: _buildSingleRequestButton(mqtt, appState),
+              ),
+              const Divider(height: 1),
+
+              // Status Query Button
+              _buildSection(
+                child: _buildStatusQueryButton(mqtt),
               ),
               const Divider(height: 1),
 
@@ -119,6 +138,8 @@ class _ControlPanelState extends State<ControlPanel> {
                   children: [
                     _buildLabel('Max Hold'),
                     _buildMaxHoldDropdown(appState),
+                    const SizedBox(height: 6),
+                    _buildMaxHoldClearButton(appState),
                   ],
                 ),
               ),
@@ -137,6 +158,30 @@ class _ControlPanelState extends State<ControlPanel> {
                   ),
                 ),
                 const Divider(height: 1),
+                // Repeat Count Section
+                _buildSection(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildLabel('Repeat Count'),
+                      _buildRepeatCountInput(appState),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1),
+                // Chart Update Interval Section
+                _buildSection(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildLabel('Update Interval'),
+                      _buildUpdateIntervalDropdown(appState),
+                      const SizedBox(height: 4),
+                      _buildQueueStatusText(appState),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1),
                 // Marker Section
                 _buildSection(
                   child: Column(
@@ -148,6 +193,11 @@ class _ControlPanelState extends State<ControlPanel> {
                   ),
                 ),
                 const Divider(height: 1),
+                // Save FFT Section
+                _buildSection(
+                  child: _buildSaveFftButton(appState),
+                ),
+                const Divider(height: 1),
               ],
 
               // IQ Data specific controls
@@ -156,8 +206,13 @@ class _ControlPanelState extends State<ControlPanel> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _buildLabel('Num of Capture Bytes'),
+                      _buildLabel('Capture Bytes'),
                       _buildCaptureLengthInput(appState),
+                      const SizedBox(height: 4),
+                      Text(
+                        '= ${appState.iqByteSize ~/ 8} samples',
+                        style: TextStyle(fontSize: 10, color: Colors.grey[600]),
+                      ),
                     ],
                   ),
                 ),
@@ -257,7 +312,7 @@ class _ControlPanelState extends State<ControlPanel> {
   Widget _buildSingleRequestButton(MqttService mqtt, AppState appState) {
     final isEnabled = mqtt.isConnected && !appState.isMeasuring;
     final isSpectrum = appState.viewMode == ViewMode.spectrum;
-    final buttonText = isSpectrum ? 'FFT' : 'IQ Capture';
+    final buttonText = isSpectrum ? 'Single FFT' : 'IQ Capture';
     final buttonIcon = isSpectrum ? Icons.show_chart : Icons.waves;
 
     return Column(
@@ -293,7 +348,7 @@ class _ControlPanelState extends State<ControlPanel> {
         const SizedBox(height: 8),
         // Single request button
         SizedBox(
-          height: 40,
+          height: 36,
           width: double.infinity,
           child: ElevatedButton.icon(
             onPressed: isEnabled && mqtt.isInitialized
@@ -305,8 +360,8 @@ class _ControlPanelState extends State<ControlPanel> {
                     }
                   }
                 : null,
-            icon: Icon(buttonIcon, size: 18),
-            label: Text(buttonText, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+            icon: Icon(buttonIcon, size: 16),
+            label: Text(buttonText, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
             style: ElevatedButton.styleFrom(
               backgroundColor: isSpectrum ? Colors.blue[600] : Colors.purple[600],
               foregroundColor: Colors.white,
@@ -315,25 +370,58 @@ class _ControlPanelState extends State<ControlPanel> {
             ),
           ),
         ),
+        // Repeated FFT button (spectrum only)
+        if (isSpectrum) ...[
+          const SizedBox(height: 6),
+          SizedBox(
+            height: 36,
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: isEnabled && mqtt.isInitialized
+                  ? () => appState.requestRepeatedSpectrum()
+                  : null,
+              icon: const Icon(Icons.repeat, size: 16),
+              label: const Text('Repeat FFT', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green[600],
+                foregroundColor: Colors.white,
+                disabledBackgroundColor: Colors.grey[400],
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+              ),
+            ),
+          ),
+        ],
         if (appState.isMeasuring)
           Padding(
             padding: const EdgeInsets.only(top: 6),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
+            child: Column(
               children: [
-                SizedBox(
-                  width: 12,
-                  height: 12,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Colors.blue[600],
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.blue[600],
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Measuring...',
+                      style: TextStyle(fontSize: 11, color: Colors.blue[600]),
+                    ),
+                  ],
+                ),
+                if (appState.totalCount > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      '${appState.currentIteration} / ${appState.totalCount}',
+                      style: TextStyle(fontSize: 10, color: Colors.grey[600], fontWeight: FontWeight.bold),
+                    ),
                   ),
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  'Requesting...',
-                  style: TextStyle(fontSize: 11, color: Colors.blue[600]),
-                ),
               ],
             ),
           ),
@@ -485,6 +573,27 @@ class _ControlPanelState extends State<ControlPanel> {
     );
   }
 
+  Widget _buildMaxHoldClearButton(AppState appState) {
+    return SizedBox(
+      height: 24,
+      width: double.infinity,
+      child: OutlinedButton(
+        onPressed: appState.maxHold && appState.maxHoldData != null
+            ? () => appState.clearMaxHold()
+            : null,
+        style: OutlinedButton.styleFrom(
+          foregroundColor: Colors.orange,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+        ),
+        child: const Text(
+          'Clear',
+          style: TextStyle(fontSize: 11),
+        ),
+      ),
+    );
+  }
+
   Widget _buildMarkerDropdown(AppState appState) {
     return Container(
       height: 28,
@@ -558,6 +667,44 @@ class _ControlPanelState extends State<ControlPanel> {
     }
   }
 
+  Widget _buildRepeatCountInput(AppState appState) {
+    return SizedBox(
+      height: 28,
+      child: Focus(
+        onFocusChange: (hasFocus) {
+          if (!hasFocus) {
+            _applyRepeatCount(appState);
+          }
+        },
+        child: TextField(
+          controller: _repeatCountController,
+          decoration: InputDecoration(
+            isDense: true,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(4)),
+            filled: true,
+            fillColor: Colors.white,
+            hintText: 'max 10000',
+            hintStyle: TextStyle(fontSize: 10, color: Colors.grey[500]),
+          ),
+          style: const TextStyle(fontSize: 12),
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          onSubmitted: (value) => _applyRepeatCount(appState),
+        ),
+      ),
+    );
+  }
+
+  void _applyRepeatCount(AppState appState) {
+    final count = int.tryParse(_repeatCountController.text);
+    if (count != null && count > 0 && count <= 10000) {
+      appState.repeatCount = count;
+    } else {
+      _repeatCountController.text = appState.repeatCount.toString();
+    }
+  }
+
   Widget _buildCaptureLengthInput(AppState appState) {
     return SizedBox(
       height: 28,
@@ -575,7 +722,7 @@ class _ControlPanelState extends State<ControlPanel> {
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(4)),
             filled: true,
             fillColor: Colors.white,
-            hintText: 'max ${Protocol.maxIqSamples}',
+            hintText: 'max ${Protocol.maxIqSamples * 4}',
             hintStyle: TextStyle(fontSize: 10, color: Colors.grey[500]),
           ),
           style: const TextStyle(fontSize: 12),
@@ -588,11 +735,55 @@ class _ControlPanelState extends State<ControlPanel> {
   }
 
   void _applyCaptureLength(AppState appState) {
-    final count = int.tryParse(_captureLengthController.text);
-    if (count != null && count > 0 && count <= Protocol.maxIqSamples) {
-      appState.iqSampleCount = count;
+    final byteSize = int.tryParse(_captureLengthController.text);
+    if (byteSize != null && byteSize >= 4 && byteSize <= Protocol.maxIqSamples * 4) {
+      appState.iqByteSize = byteSize;
     } else {
-      _captureLengthController.text = appState.iqSampleCount.toString();
+      _captureLengthController.text = appState.iqByteSize.toString();
+    }
+  }
+
+  Widget _buildSaveFftButton(AppState appState) {
+    return SizedBox(
+      height: 32,
+      width: double.infinity,
+      child: ElevatedButton.icon(
+        onPressed: appState.spectrumData != null
+            ? () => _saveFftData(context, appState)
+            : null,
+        icon: const Icon(Icons.save, size: 16),
+        label: const Text('Save FFT', style: TextStyle(fontSize: 12)),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.green[600],
+          foregroundColor: Colors.white,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _saveFftData(BuildContext context, AppState appState) async {
+    if (appState.spectrumData == null) return;
+
+    final path = await FileService.saveFftToAutoPath(appState.spectrumData!);
+    if (context.mounted) {
+      if (path != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('FFT saved to: $path'),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Failed to save FFT data'),
+            backgroundColor: Colors.red,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
     }
   }
 
@@ -625,6 +816,179 @@ class _ControlPanelState extends State<ControlPanel> {
           SnackBar(
             content: Text('Saved to: $path'),
             backgroundColor: Colors.green,
+          ),
+        );
+      }
+    }
+  }
+
+  Widget _buildUpdateIntervalDropdown(AppState appState) {
+    return Container(
+      height: 28,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: Colors.grey[400]!),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<int>(
+                value: appState.chartUpdateIntervalMs,
+                isExpanded: true,
+                isDense: true,
+                icon: const Icon(Icons.arrow_drop_down, size: 18),
+                items: const [
+                  DropdownMenuItem(
+                    value: 100,
+                    child: Text('100', style: TextStyle(fontSize: 12)),
+                  ),
+                  DropdownMenuItem(
+                    value: 200,
+                    child: Text('200', style: TextStyle(fontSize: 12)),
+                  ),
+                  DropdownMenuItem(
+                    value: 300,
+                    child: Text('300', style: TextStyle(fontSize: 12)),
+                  ),
+                  DropdownMenuItem(
+                    value: 500,
+                    child: Text('500', style: TextStyle(fontSize: 12)),
+                  ),
+                ],
+                onChanged: (value) {
+                  if (value != null) {
+                    appState.chartUpdateIntervalMs = value;
+                  }
+                },
+              ),
+            ),
+          ),
+          const Text('ms', style: TextStyle(fontSize: 12)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildQueueStatusText(AppState appState) {
+    if (appState.queuedSpectrumCount == 0) {
+      return const SizedBox.shrink();
+    }
+
+    return Text(
+      'Queue: ${appState.queuedSpectrumCount}',
+      style: TextStyle(
+        fontSize: 10,
+        color: appState.queuedSpectrumCount > 10 ? Colors.orange : Colors.grey[600],
+        fontStyle: FontStyle.italic,
+      ),
+    );
+  }
+
+  Widget _buildStatusQueryButton(MqttService mqtt) {
+    final isEnabled = mqtt.isConnected && mqtt.isInitialized;
+
+    return SizedBox(
+      height: 32,
+      width: double.infinity,
+      child: OutlinedButton.icon(
+        onPressed: isEnabled
+            ? () => _requestDeviceStatus(mqtt)
+            : null,
+        icon: const Icon(Icons.info_outline, size: 16),
+        label: const Text('Device Status', style: TextStyle(fontSize: 12)),
+        style: OutlinedButton.styleFrom(
+          foregroundColor: Colors.teal,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+        ),
+      ),
+    );
+  }
+
+  void _requestDeviceStatus(MqttService mqtt) {
+    // Cancel any existing timer and subscription
+    _statusTimeoutTimer?.cancel();
+    _statusSubscription?.cancel();
+
+    // Subscribe to status stream
+    _statusSubscription = mqtt.statusStream.listen((statusResponse) {
+      _handleStatusResponse(statusResponse);
+    });
+
+    // Send status query command
+    mqtt.sendStatusQueryCommand();
+
+    // Show loading indicator
+    _isLoadingDialogOpen = true;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Requesting device status...'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    // Auto-close loading dialog after timeout (only if still loading)
+    _statusTimeoutTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted && _isLoadingDialogOpen) {
+        _isLoadingDialogOpen = false;
+        Navigator.of(context).pop();
+
+        // Show timeout error message
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Status request timed out'),
+            backgroundColor: Colors.orange,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    });
+  }
+
+  void _handleStatusResponse(String response) {
+    // Cancel timeout timer
+    _statusTimeoutTimer?.cancel();
+
+    // Close loading dialog if open
+    if (mounted && _isLoadingDialogOpen) {
+      _isLoadingDialogOpen = false;
+      Navigator.of(context).pop();
+    }
+
+    try {
+      final status = DeviceStatus.fromMqttResponse(response);
+
+      // Show status dialog (this should stay open until user closes it)
+      if (mounted) {
+        showDialog(
+          context: context,
+          barrierDismissible: true, // Allow closing by clicking outside
+          builder: (context) => DeviceStatusDialog(status: status),
+        );
+      }
+    } catch (e) {
+      // Show error message
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to parse status: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
           ),
         );
       }

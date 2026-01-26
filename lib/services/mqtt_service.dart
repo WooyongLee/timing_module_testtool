@@ -42,10 +42,10 @@ class MqttService extends ChangeNotifier {
   final _spectrumDataController = StreamController<Uint8List>.broadcast();
   final _iqDataController = StreamController<Uint8List>.broadcast();
   final _logController = StreamController<MqttLogEntry>.broadcast();
+  final _statusController = StreamController<String>.broadcast();
 
   // Pending binary data info
   int _pendingDataType = -1;
-  int _pendingDataSize = 0;
 
   // Log history
   final List<MqttLogEntry> _logHistory = [];
@@ -63,6 +63,7 @@ class MqttService extends ChangeNotifier {
   Stream<Uint8List> get spectrumDataStream => _spectrumDataController.stream;
   Stream<Uint8List> get iqDataStream => _iqDataController.stream;
   Stream<MqttLogEntry> get logStream => _logController.stream;
+  Stream<String> get statusStream => _statusController.stream;
 
   void _addLog(MqttLogEntry entry) {
     _logHistory.add(entry);
@@ -177,17 +178,46 @@ class MqttService extends ChangeNotifier {
   }
 
   /// Request FFT spectrum measurement (single shot)
-  void sendSpectrumCommand({int fftLen = Protocol.defaultFftLength}) {
-    sendCommand('0x44 0x01 $fftLen');
+  /// Protocol: 0x44 0x01 <freq_hz> <rbw_hz> <fft_size>
+  void sendSpectrumCommand({
+    required int freqHz,
+    required int rbwHz,
+    int fftLen = Protocol.defaultFftLength,
+  }) {
+    sendCommand('0x44 0x01 $freqHz $rbwHz $fftLen');
     _pendingDataType = Protocol.typeSpectrum;
     _pendingDataSize = fftLen * 4;
   }
 
+  /// Request repeated FFT spectrum measurement
+  /// Protocol: 0x44 0x04 <freq_hz> <rbw_hz> <fft_size> <count>
+  void sendRepeatedSpectrumCommand({
+    required int freqHz,
+    required int rbwHz,
+    required int fftLen,
+    required int count,
+  }) {
+    sendCommand('0x44 0x04 $freqHz $rbwHz $fftLen $count');
+    _pendingDataType = Protocol.typeRepeatedSpectrum;
+    _pendingDataSize = fftLen * 4;
+  }
+
   /// Request IQ capture (single shot)
-  void sendIqCaptureCommand({int sampleCount = 8192}) {
-    sendCommand('0x44 0x02 $sampleCount');
+  /// Protocol: 0x44 0x02 <freq_hz> <rbw_hz> <iq_byte_size>
+  void sendIqCaptureCommand({
+    required int freqHz,
+    required int rbwHz,
+    required int iqByteSize,
+  }) {
+    sendCommand('0x44 0x02 $freqHz $rbwHz $iqByteSize');
     _pendingDataType = Protocol.typeIqCapture;
-    _pendingDataSize = sampleCount * 4;
+    _pendingDataSize = iqByteSize;
+  }
+
+  /// Request device status query
+  /// Protocol: 0x44 0x05
+  void sendStatusQueryCommand() {
+    sendCommand('0x44 0x05');
   }
 
   // Callbacks
@@ -243,39 +273,64 @@ class MqttService extends ChangeNotifier {
     try {
       final header = int.parse(parts[0]);
 
-      // Support both response formats:
-      // New format: "0x44 0xXX OK" or "0x44 0xXX FAIL"
-      // Legacy format: "0x45 <type> <status>" (e.g., "0x45 0 1")
+      // Support multiple response formats:
+      // Format 1: "0x44 0xXX OK" or "0x44 0xXX FAIL"
+      // Format 2: "0x45 <type> <status>" (e.g., "0x45 0 1")
+      // Format 3 (repeated): "0x45 <type> <status> <current_iteration> <total_count>"
+      // Format 4 (status): "0x45 0x05 <status_data...>"
       if (header == Protocol.cmdHeader && parts.length >= 3) {
-        // New format: 0x44 0xXX OK/FAIL
+        // Format 1: 0x44 0xXX OK/FAIL
         final type = int.parse(parts[1]);
         final statusStr = parts[2].toUpperCase();
         final isOk = statusStr == 'OK';
 
         _processResponse(type, isOk);
       } else if (header == Protocol.respHeader && parts.length >= 3) {
-        // Legacy format: 0x45 <type> <status>
-        // e.g., "0x45 0 1" means init success (type=0, status=1 means OK)
         final type = int.parse(parts[1]);
+
+        // Check if this is a status query response (Format 4)
+        if (type == Protocol.typeStatusQuery && parts.length >= 24) {
+          // Status query response contains full device status
+          _statusController.add(responseStr);
+          return;
+        }
+
         final statusValue = int.parse(parts[2]);
         final isOk = statusValue == 1; // 1 = success
 
-        _processResponse(type, isOk);
+        if (parts.length >= 5) {
+          // Format 3: includes iteration info
+          final currentIter = int.parse(parts[3]);
+          final totalCount = int.parse(parts[4]);
+          _processResponse(type, isOk, currentIter: currentIter, totalCount: totalCount);
+        } else {
+          // Format 2: legacy format
+          _processResponse(type, isOk);
+        }
       }
     } catch (e) {
       debugPrint('Error parsing response: $e');
     }
   }
 
-  void _processResponse(int type, bool isOk) {
+  void _processResponse(int type, bool isOk, {int? currentIter, int? totalCount}) {
     if (type == Protocol.typeInit) {
       if (isOk) {
         _isInitialized = true;
         notifyListeners();
       }
-    } else if (type == Protocol.typeSpectrum) {
+    } else if (type == Protocol.typeSpectrum || type == Protocol.typeRepeatedSpectrum) {
       if (isOk) {
-        _pendingDataType = Protocol.typeSpectrum;
+        _pendingDataType = type;
+
+        // If this is the last iteration of repeated spectrum, reset pending type after data
+        if (type == Protocol.typeRepeatedSpectrum &&
+            currentIter != null &&
+            totalCount != null &&
+            currentIter >= totalCount) {
+          // Will be reset in _handleBinaryData after receiving last data
+          _pendingDataType = Protocol.typeSpectrum; // Use spectrum type to trigger reset
+        }
       }
     } else if (type == Protocol.typeIqCapture) {
       if (isOk) {
@@ -287,6 +342,8 @@ class MqttService extends ChangeNotifier {
       type: type,
       status: isOk ? Protocol.statusOk : Protocol.statusError,
       isSuccess: isOk,
+      currentIteration: currentIter,
+      totalCount: totalCount,
     );
 
     _responseController.add(response);
@@ -301,13 +358,16 @@ class MqttService extends ChangeNotifier {
       isBinary: true,
     ));
 
-    if (_pendingDataType == Protocol.typeSpectrum) {
+    if (_pendingDataType == Protocol.typeSpectrum || _pendingDataType == Protocol.typeRepeatedSpectrum) {
       _spectrumDataController.add(data);
+      // For repeated spectrum, don't reset pending type (more data coming)
+      if (_pendingDataType == Protocol.typeSpectrum) {
+        _pendingDataType = -1;
+      }
     } else if (_pendingDataType == Protocol.typeIqCapture) {
       _iqDataController.add(data);
+      _pendingDataType = -1;
     }
-
-    _pendingDataType = -1;
   }
 
   @override
@@ -317,6 +377,7 @@ class MqttService extends ChangeNotifier {
     _spectrumDataController.close();
     _iqDataController.close();
     _logController.close();
+    _statusController.close();
     super.dispose();
   }
 }
@@ -326,11 +387,15 @@ class MqttResponse {
   final int type;
   final int status;
   final bool isSuccess;
+  final int? currentIteration;
+  final int? totalCount;
 
   MqttResponse({
     required this.type,
     required this.status,
     required this.isSuccess,
+    this.currentIteration,
+    this.totalCount,
   });
 
   bool get isOk => isSuccess;

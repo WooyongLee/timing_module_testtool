@@ -26,13 +26,13 @@ class IqPlaceholder extends StatelessWidget {
                     style: TextStyle(fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(width: 16),
-                  const Text('Samples:'),
+                  const Text('Bytes:'),
                   const SizedBox(width: 8),
                   SizedBox(
                     width: 100,
                     child: TextField(
                       controller: TextEditingController(
-                        text: appState.iqSampleCount.toString(),
+                        text: appState.iqByteSize.toString(),
                       ),
                       decoration: const InputDecoration(
                         isDense: true,
@@ -45,9 +45,9 @@ class IqPlaceholder extends StatelessWidget {
                       style: const TextStyle(fontSize: 14),
                       keyboardType: TextInputType.number,
                       onSubmitted: (value) {
-                        final count = int.tryParse(value);
-                        if (count != null) {
-                          appState.iqSampleCount = count;
+                        final byteSize = int.tryParse(value);
+                        if (byteSize != null) {
+                          appState.iqByteSize = byteSize;
                         }
                       },
                     ),
@@ -62,7 +62,7 @@ class IqPlaceholder extends StatelessWidget {
                   if (appState.iqData != null) ...[
                     const SizedBox(width: 16),
                     Text(
-                      'Captured: ${appState.iqData!.sampleCount} samples',
+                      'Captured: ${appState.iqData!.sampleCount} samples (${appState.iqByteSize} bytes)',
                       style: const TextStyle(color: Colors.green),
                     ),
                   ],

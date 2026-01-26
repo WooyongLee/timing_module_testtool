@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:path/path.dart' as path;
 import '../models/spectrum_data.dart';
 import '../models/iq_data.dart';
 
@@ -106,6 +107,62 @@ class FileService {
       return outputPath;
     } catch (e) {
       debugPrint('Error saving IQ binary: $e');
+      return null;
+    }
+  }
+
+  /// Save FFT spectrum data to text file (auto path: executable/fft_data/YYYYMMDD/HHMMSS.txt)
+  static Future<String?> saveFftToAutoPath(SpectrumData data) async {
+    try {
+      // Get executable directory
+      final executablePath = Platform.resolvedExecutable;
+      final executableDir = path.dirname(executablePath);
+
+      // Get current date and time
+      final now = DateTime.now();
+      final dateFolder = '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}';
+      final fileName = '${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}${now.second.toString().padLeft(2, '0')}.txt';
+
+      // Create directory path: executable/fft_data/YYYYMMDD/
+      final fftDataDir = path.join(executableDir, 'fft_data', dateFolder);
+      final directory = Directory(fftDataDir);
+
+      // Create directories if they don't exist
+      if (!await directory.exists()) {
+        await directory.create(recursive: true);
+        debugPrint('Created directory: $fftDataDir');
+      }
+
+      // Create full file path
+      final filePath = path.join(fftDataDir, fileName);
+      final file = File(filePath);
+
+      // Build FFT data content (one value per line)
+      final buffer = StringBuffer();
+
+      // Add header information
+      buffer.writeln('# FFT Spectrum Data');
+      buffer.writeln('# Center Frequency: ${data.centerFreqKhz} kHz');
+      buffer.writeln('# RBW Index: ${data.rbwIndex}');
+      buffer.writeln('# FFT Points: ${data.fftPoints}');
+      buffer.writeln('# Start Frequency: ${data.startFreqMhz.toStringAsFixed(3)} MHz');
+      buffer.writeln('# Stop Frequency: ${data.stopFreqMhz.toStringAsFixed(3)} MHz');
+      buffer.writeln('# Timestamp: ${now.toIso8601String()}');
+      buffer.writeln('# Format: Power (dBm)');
+      buffer.writeln('#');
+
+      // Write FFT values (one per line)
+      for (final powerDbm in data.powerDbm) {
+        buffer.writeln(powerDbm.toStringAsFixed(6));
+      }
+
+      // Write to file
+      await file.writeAsString(buffer.toString());
+
+      debugPrint('FFT data saved to: $filePath');
+      return filePath;
+    } catch (e) {
+      debugPrint('Error saving FFT data: $e');
       return null;
     }
   }

@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../models/spectrum_data.dart';
-import '../constants/protocol.dart';
 
 class SpectrumChart extends StatelessWidget {
   final SpectrumData? spectrumData;
@@ -15,8 +14,8 @@ class SpectrumChart extends StatelessWidget {
     super.key,
     this.spectrumData,
     this.maxHoldData,
-    this.yMin = 0,
-    this.yMax = 120,
+    this.yMin = 60,
+    this.yMax = 180,
     this.showPeakMarker = true,
     this.downsampleFactor = 8, // 8192 / 8 = 1024 points for display
   });

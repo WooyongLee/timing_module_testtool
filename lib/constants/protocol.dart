@@ -16,6 +16,8 @@ class Protocol {
   static const int typeSpectrum = 0x01;
   static const int typeIqCapture = 0x02;
   static const int typeStop = 0x0F;
+  static const int typeRepeatedSpectrum = 0x04;
+  static const int typeStatusQuery = 0x05;
 
   // Status Codes
   static const int statusOk = 0;
@@ -26,7 +28,7 @@ class Protocol {
   // Configuration
   static const int sampleRate = 61440000; // 61.44 MHz
   static const int defaultFftLength = 8192;
-  static const int maxFftLength = 2457600; // Max FFT length
+  static const int maxFftLength = 65536; // Max FFT length
   static const int maxIqSamples = 2457600; // Max IQ capture length
 
   // Frequency Range (kHz)
@@ -40,6 +42,7 @@ class Protocol {
     RbwOption(index: 1, valueHz: 30000, label: '30 kHz'),
     RbwOption(index: 2, valueHz: 60000, label: '60 kHz'),
     RbwOption(index: 3, valueHz: 120000, label: '120 kHz'),
+    RbwOption(index: 4, valueHz: 0, label: '- kHz (from FFT Length)'),
   ];
 
   static const int defaultRbwIndex = 2; // 60 kHz
