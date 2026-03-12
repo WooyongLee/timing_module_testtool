@@ -7,6 +7,11 @@ import '../models/spectrum_data.dart';
 import '../models/iq_data.dart';
 import 'mqtt_service.dart';
 
+/// Feature flag: Use legacy repeat FFT (firmware-based) vs new repeat FFT (timer-based)
+/// - true: Use legacy 0x44 0x04 command (firmware handles repetition)
+/// - false: Use timer to repeatedly call Single FFT (0x44 0x01) based on update interval
+const bool USE_LEGACY_REPEAT_FFT = false;
+
 /// View mode enum
 enum ViewMode { spectrum, iqData }
 
@@ -18,7 +23,7 @@ class AppState extends ChangeNotifier {
   ViewMode _viewMode = ViewMode.spectrum;
 
   // Measurement settings
-  int _centerFreqMhz = 3000; // MHz (displayed as MHz, converted to Hz for protocol)
+  double _centerFreqMhz = 3000; // MHz (displayed as MHz, converted to Hz for protocol)
   int _rbwIndex = Protocol.defaultRbwIndex;
   bool _maxHold = false;
   int _iqByteSize = 16384; // IQ capture byte size (4 bytes per I/Q pair)
@@ -50,14 +55,18 @@ class AppState extends ChangeNotifier {
   Timer? _spectrumUpdateTimer;
   int _chartUpdateIntervalMs = 200; // Default 200ms (5 updates/sec)
 
+  // New repeat FFT (timer-based) variables
+  Timer? _repeatTimer;
+  int _remainingRepeatCount = 0;
+
   AppState({required this.mqttService}) {
     _setupSubscriptions();
   }
 
   // Getters
   ViewMode get viewMode => _viewMode;
-  int get centerFreqMhz => _centerFreqMhz;
-  int get centerFreqHz => _centerFreqMhz * 1000000;
+  double get centerFreqMhz => _centerFreqMhz;
+  int get centerFreqHz => (_centerFreqMhz * 1000000).round();
   int get rbwIndex => _rbwIndex;
   RbwOption get currentRbw => Protocol.rbwOptions[_rbwIndex];
   bool get maxHold => _maxHold;
@@ -80,7 +89,7 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  set centerFreqMhz(int value) {
+  set centerFreqMhz(double value) {
     if (value < 60) value = 60;
     if (value > 6000) value = 6000;
     _centerFreqMhz = value;
@@ -124,7 +133,7 @@ class AppState extends ChangeNotifier {
   }
 
   set repeatCount(int value) {
-    if (value > 0 && value <= 10000) {
+    if (value > 0 && value <= 1000) {
       _repeatCount = value;
       notifyListeners();
     }
@@ -161,36 +170,92 @@ class AppState extends ChangeNotifier {
     _spectrumUpdateTimer = null;
   }
 
-  void _handleResponse(MqttResponse response) {
-    debugPrint('Response: type=${response.type}, status=${response.statusMessage}');
+  void _startRepeatTimer() {
+    _repeatTimer?.cancel();
+    _repeatTimer = Timer.periodic(
+      Duration(milliseconds: _chartUpdateIntervalMs),
+      (_) => _executeNextRepeat(),
+    );
+    // Execute first one immediately
+    _executeNextRepeat();
+  }
 
-    // Update iteration info for repeated spectrum
-    if (response.type == Protocol.typeRepeatedSpectrum &&
-        response.currentIteration != null &&
-        response.totalCount != null) {
-      _currentIteration = response.currentIteration!;
-      _totalCount = response.totalCount!;
+  void _stopRepeatTimer() {
+    _repeatTimer?.cancel();
+    _repeatTimer = null;
+  }
 
-      // Check if this is the last iteration
-      if (_currentIteration >= _totalCount) {
-        // Process any remaining queued data
-        while (_spectrumDataQueue.isNotEmpty) {
-          _processQueuedSpectrumData();
-        }
-        _stopUpdateTimer();
-        _isMeasuring = false;
-        _currentIteration = 0;
-        _totalCount = 0;
-      }
+  void _executeNextRepeat() {
+    debugPrint('_remainingRepeatCount=$_remainingRepeatCount, initialized=${mqttService.isInitialized}');
 
-      notifyListeners();
-    } else if (!response.isOk) {
-      _stopUpdateTimer();
-      _spectrumDataQueue.clear();
+    if (_remainingRepeatCount <= 0 || !mqttService.isInitialized) {
+      // Stop repeating
+      _stopRepeatTimer();
       _isMeasuring = false;
       _currentIteration = 0;
       _totalCount = 0;
+      _remainingRepeatCount = 0;
       notifyListeners();
+      return;
+    }
+
+    // Send Single FFT command
+    mqttService.sendSpectrumCommand(
+      freqHz: centerFreqHz,
+      rbwHz: currentRbw.valueHz,
+      fftLen: _fftLength,
+    );
+
+    // Update iteration count
+    _currentIteration = _totalCount - _remainingRepeatCount + 1;
+    _remainingRepeatCount--;
+    notifyListeners();
+  }
+
+  void _handleResponse(MqttResponse response) {
+    debugPrint('Response: type=${response.type}, status=${response.statusMessage}');
+
+    if (USE_LEGACY_REPEAT_FFT) {
+      // Legacy mode: Handle firmware-based repeated spectrum responses
+      if (response.type == Protocol.typeRepeatedSpectrum &&
+          response.currentIteration != null &&
+          response.totalCount != null) {
+        _currentIteration = response.currentIteration!;
+        _totalCount = response.totalCount!;
+
+        // Check if this is the last iteration
+        if (_currentIteration >= _totalCount) {
+          // Process any remaining queued data
+          while (_spectrumDataQueue.isNotEmpty) {
+            _processQueuedSpectrumData();
+          }
+          _stopUpdateTimer();
+          _isMeasuring = false;
+          _currentIteration = 0;
+          _totalCount = 0;
+        }
+
+        notifyListeners();
+      } else if (!response.isOk) {
+        _stopUpdateTimer();
+        _spectrumDataQueue.clear();
+        _isMeasuring = false;
+        _currentIteration = 0;
+        _totalCount = 0;
+        notifyListeners();
+      }
+    } else {
+      // New mode: Single FFT responses during repeat operation
+      // No special handling needed - each response is independent
+      if (!response.isOk) {
+        _stopRepeatTimer();
+        _spectrumDataQueue.clear();
+        _isMeasuring = false;
+        _currentIteration = 0;
+        _totalCount = 0;
+        _remainingRepeatCount = 0;
+        notifyListeners();
+      }
     }
   }
 
@@ -202,15 +267,20 @@ class AppState extends ChangeNotifier {
       return;
     }
 
-    // For repeated measurements, queue the data for throttled updates
-    if (_totalCount > 0) {
-      _spectrumDataQueue.add(data);
-      // Limit queue size to prevent memory issues (keep only last 50 items)
-      while (_spectrumDataQueue.length > 50) {
-        _spectrumDataQueue.removeFirst();
+    if (USE_LEGACY_REPEAT_FFT) {
+      // Legacy mode: Queue data for throttled updates
+      if (_totalCount > 0) {
+        _spectrumDataQueue.add(data);
+        // Limit queue size to prevent memory issues (keep only last 50 items)
+        while (_spectrumDataQueue.length > 50) {
+          _spectrumDataQueue.removeFirst();
+        }
+      } else {
+        // For single shot, process immediately
+        _processSpectrumData(data);
       }
     } else {
-      // For single shot, process immediately
+      // New mode: Always process immediately (timer controls repetition rate)
       _processSpectrumData(data);
     }
   }
@@ -228,7 +298,7 @@ class AppState extends ChangeNotifier {
   void _processSpectrumData(Uint8List data) {
     _spectrumData = SpectrumData.fromBinary(
       binaryData: data,
-      centerFreqKhz: _centerFreqMhz * 1000,
+      centerFreqKhz: (_centerFreqMhz * 1000).round(),
       rbwIndex: _rbwIndex,
     );
 
@@ -252,7 +322,7 @@ class AppState extends ChangeNotifier {
           );
         }
         _maxHoldData = SpectrumData(
-          centerFreqKhz: _centerFreqMhz * 1000,
+          centerFreqKhz: (_centerFreqMhz * 1000).round(),
           rbwIndex: _rbwIndex,
           powerDbm: newPower,
           fftPoints: _fftLength,
@@ -280,7 +350,7 @@ class AppState extends ChangeNotifier {
 
     _iqData = IqData.fromBinary(
       binaryData: data,
-      centerFreqKhz: _centerFreqMhz * 1000,
+      centerFreqKhz: (_centerFreqMhz * 1000).round(),
       sampleCount: _iqByteSize,  // byte size (IqData.fromBinary calculates actual samples from length)
     );
 
@@ -321,19 +391,33 @@ class AppState extends ChangeNotifier {
       return;
     }
 
-    _isMeasuring = true;
-    _currentIteration = 0;
-    _totalCount = _repeatCount;
-    _spectrumDataQueue.clear();
-    _startUpdateTimer();
-    notifyListeners();
+    if (USE_LEGACY_REPEAT_FFT) {
+      // Legacy mode: Use firmware-based repeated spectrum (0x44 0x04)
+      _isMeasuring = true;
+      _currentIteration = 0;
+      _totalCount = _repeatCount;
+      _spectrumDataQueue.clear();
+      _startUpdateTimer();
+      notifyListeners();
 
-    mqttService.sendRepeatedSpectrumCommand(
-      freqHz: centerFreqHz,
-      rbwHz: currentRbw.valueHz,
-      fftLen: _fftLength,
-      count: _repeatCount,
-    );
+      mqttService.sendRepeatedSpectrumCommand(
+        freqHz: centerFreqHz,
+        rbwHz: currentRbw.valueHz,
+        fftLen: _fftLength,
+        count: _repeatCount,
+      );
+    } else {
+      // New mode: Use timer to repeatedly call Single FFT
+      _isMeasuring = true;
+      _currentIteration = 0;
+      _totalCount = _repeatCount;
+      _remainingRepeatCount = _repeatCount;
+      _spectrumDataQueue.clear();
+      notifyListeners();
+
+      // Start the repeat timer
+      _startRepeatTimer();
+    }
   }
 
   /// Request single IQ capture
@@ -365,6 +449,7 @@ class AppState extends ChangeNotifier {
     _spectrumSubscription?.cancel();
     _iqSubscription?.cancel();
     _stopUpdateTimer();
+    _stopRepeatTimer();
     _spectrumDataQueue.clear();
     super.dispose();
   }

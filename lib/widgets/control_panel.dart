@@ -8,6 +8,7 @@ import '../services/file_service.dart';
 import '../constants/protocol.dart';
 import '../models/device_status.dart';
 import '../widgets/device_status_dialog.dart';
+import '../screens/register_window.dart';
 
 class ControlPanel extends StatefulWidget {
   const ControlPanel({super.key});
@@ -43,9 +44,14 @@ class _ControlPanelState extends State<ControlPanel> {
     super.dispose();
   }
 
+  String _formatFreqMhz(double freq) {
+    if (freq == freq.truncateToDouble()) return freq.toInt().toString();
+    return freq.toStringAsFixed(3).replaceAll(RegExp(r'0+$'), '');
+  }
+
   void _initControllersOnce(AppState appState) {
     if (!_controllersInitialized) {
-      _freqController.text = appState.centerFreqMhz.toString();
+      _freqController.text = _formatFreqMhz(appState.centerFreqMhz);
       _captureLengthController.text = appState.iqByteSize.toString();
       _fftLengthController.text = appState.fftLength.toString();
       _repeatCountController.text = appState.repeatCount.toString();
@@ -77,7 +83,13 @@ class _ControlPanelState extends State<ControlPanel> {
                     _buildLabel('IP'),
                     _buildIpInput(mqtt),
                     const SizedBox(height: 8),
-                    _buildConnectButton(mqtt),
+                    Row(
+                      children: [
+                        Expanded(child: _buildConnectButton(mqtt)),
+                        const SizedBox(width: 4),
+                        _buildRegisterButton(mqtt),
+                      ],
+                    ),
                   ],
                 ),
               ),
@@ -309,6 +321,27 @@ class _ControlPanelState extends State<ControlPanel> {
     );
   }
 
+  Widget _buildRegisterButton(MqttService mqtt) {
+    return SizedBox(
+      height: 28,
+      width: 28,
+      child: IconButton(
+        onPressed: mqtt.isConnected
+            ? () => showRegisterWindow(context, mqtt)
+            : null,
+        icon: const Icon(Icons.memory, size: 16),
+        padding: EdgeInsets.zero,
+        tooltip: 'Registers',
+        style: IconButton.styleFrom(
+          backgroundColor: mqtt.isConnected ? Colors.teal[50] : null,
+          foregroundColor: mqtt.isConnected ? Colors.teal : Colors.grey,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+          side: BorderSide(color: mqtt.isConnected ? Colors.teal : Colors.grey[400]!),
+        ),
+      ),
+    );
+  }
+
   Widget _buildSingleRequestButton(MqttService mqtt, AppState appState) {
     final isEnabled = mqtt.isConnected && !appState.isMeasuring;
     final isSpectrum = appState.viewMode == ViewMode.spectrum;
@@ -454,7 +487,7 @@ class _ControlPanelState extends State<ControlPanel> {
               child: Text('IQ Data', style: TextStyle(fontSize: 12)),
             ),
           ],
-          onChanged: (value) {
+          onChanged: appState.isMeasuring ? null : (value) {
             if (value != null) {
               appState.viewMode = value;
             }
@@ -470,24 +503,27 @@ class _ControlPanelState extends State<ControlPanel> {
         Expanded(
           child: SizedBox(
             height: 28,
-            child: TextField(
-              controller: _freqController,
-              decoration: InputDecoration(
-                isDense: true,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(4)),
-                filled: true,
-                fillColor: Colors.white,
-              ),
-              style: const TextStyle(fontSize: 12),
-              keyboardType: TextInputType.number,
-              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-              onSubmitted: (value) {
-                final freq = int.tryParse(value);
-                if (freq != null) {
-                  appState.centerFreqMhz = freq;
+            child: Focus(
+              onFocusChange: (hasFocus) {
+                if (!hasFocus) {
+                  _applyFrequency(appState);
                 }
               },
+              child: TextField(
+                controller: _freqController,
+                enabled: !appState.isMeasuring,
+                decoration: InputDecoration(
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(4)),
+                  filled: true,
+                  fillColor: Colors.white,
+                ),
+                style: const TextStyle(fontSize: 12),
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
+                onSubmitted: (value) => _applyFrequency(appState),
+              ),
             ),
           ),
         ),
@@ -495,6 +531,16 @@ class _ControlPanelState extends State<ControlPanel> {
         const Text('MHz', style: TextStyle(fontSize: 12)),
       ],
     );
+  }
+
+  void _applyFrequency(AppState appState) {
+    final freq = double.tryParse(_freqController.text);
+    if (freq != null && freq >= 60 && freq <= 6000) {
+      appState.centerFreqMhz = freq;
+      _freqController.text = _formatFreqMhz(freq);
+    } else {
+      _freqController.text = _formatFreqMhz(appState.centerFreqMhz);
+    }
   }
 
   Widget _buildRbwDropdown(AppState appState) {
@@ -524,7 +570,7 @@ class _ControlPanelState extends State<ControlPanel> {
                     ),
                   );
                 }).toList(),
-                onChanged: (value) {
+                onChanged: appState.isMeasuring ? null : (value) {
                   if (value != null) {
                     appState.rbwIndex = value;
                   }
@@ -563,7 +609,7 @@ class _ControlPanelState extends State<ControlPanel> {
               child: Text('On', style: TextStyle(fontSize: 12)),
             ),
           ],
-          onChanged: (value) {
+          onChanged: appState.isMeasuring ? null : (value) {
             if (value != null) {
               appState.maxHold = value;
             }
@@ -619,7 +665,7 @@ class _ControlPanelState extends State<ControlPanel> {
               child: Text('On', style: TextStyle(fontSize: 12)),
             ),
           ],
-          onChanged: (value) {
+          onChanged: appState.isMeasuring ? null : (value) {
             if (value != null) {
               appState.markerEnabled = value;
             }
@@ -640,6 +686,7 @@ class _ControlPanelState extends State<ControlPanel> {
         },
         child: TextField(
           controller: _fftLengthController,
+          enabled: !appState.isMeasuring,
           decoration: InputDecoration(
             isDense: true,
             contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -678,13 +725,14 @@ class _ControlPanelState extends State<ControlPanel> {
         },
         child: TextField(
           controller: _repeatCountController,
+          enabled: !appState.isMeasuring,
           decoration: InputDecoration(
             isDense: true,
             contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(4)),
             filled: true,
             fillColor: Colors.white,
-            hintText: 'max 10000',
+            hintText: 'max 1000',
             hintStyle: TextStyle(fontSize: 10, color: Colors.grey[500]),
           ),
           style: const TextStyle(fontSize: 12),
@@ -698,7 +746,7 @@ class _ControlPanelState extends State<ControlPanel> {
 
   void _applyRepeatCount(AppState appState) {
     final count = int.tryParse(_repeatCountController.text);
-    if (count != null && count > 0 && count <= 10000) {
+    if (count != null && count > 0 && count <= 1000) {
       appState.repeatCount = count;
     } else {
       _repeatCountController.text = appState.repeatCount.toString();
@@ -716,6 +764,7 @@ class _ControlPanelState extends State<ControlPanel> {
         },
         child: TextField(
           controller: _captureLengthController,
+          enabled: !appState.isMeasuring,
           decoration: InputDecoration(
             isDense: true,
             contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -858,7 +907,7 @@ class _ControlPanelState extends State<ControlPanel> {
                     child: Text('500', style: TextStyle(fontSize: 12)),
                   ),
                 ],
-                onChanged: (value) {
+                onChanged: appState.isMeasuring ? null : (value) {
                   if (value != null) {
                     appState.chartUpdateIntervalMs = value;
                   }

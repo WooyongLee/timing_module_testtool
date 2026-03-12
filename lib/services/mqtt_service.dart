@@ -43,6 +43,9 @@ class MqttService extends ChangeNotifier {
   final _iqDataController = StreamController<Uint8List>.broadcast();
   final _logController = StreamController<MqttLogEntry>.broadcast();
   final _statusController = StreamController<String>.broadcast();
+  final _registerResponseController = StreamController<RegisterResponse>.broadcast();
+
+  int _pendingDataSize = 0;
 
   // Pending binary data info
   int _pendingDataType = -1;
@@ -64,6 +67,7 @@ class MqttService extends ChangeNotifier {
   Stream<Uint8List> get iqDataStream => _iqDataController.stream;
   Stream<MqttLogEntry> get logStream => _logController.stream;
   Stream<String> get statusStream => _statusController.stream;
+  Stream<RegisterResponse> get registerResponseStream => _registerResponseController.stream;
 
   void _addLog(MqttLogEntry entry) {
     _logHistory.add(entry);
@@ -261,7 +265,7 @@ class MqttService extends ChangeNotifier {
 
     final parts = responseStr.trim().split(' ');
     if (parts.length < 2) return;
-    if (parts.contains("0x51") || parts.contains("0x06 0x02") || parts.contains("0x06 0x01")) return;
+    if (parts.contains("0x51") || responseStr.contains("0x06 0x02") || responseStr.contains("0x06 0x01")) return;
 
     debugPrint('MQTT RX: $responseStr');
     _addLog(MqttLogEntry(
@@ -284,9 +288,30 @@ class MqttService extends ChangeNotifier {
         final statusStr = parts[2].toUpperCase();
         final isOk = statusStr == 'OK';
 
+        // Broadcast register responses (sub-commands >= 0x10) to register stream
+        if (type >= 0x10) {
+          _registerResponseController.add(RegisterResponse(
+            subCommand: type,
+            params: parts.sublist(2),
+            rawResponse: responseStr,
+          ));
+          return;
+        }
+
         _processResponse(type, isOk);
       } else if (header == Protocol.respHeader && parts.length >= 3) {
         final type = int.parse(parts[1]);
+
+        // Broadcast register responses (sub-commands >= 0x10) to register stream
+        if (type >= 0x10) {
+          _registerResponseController.add(RegisterResponse(
+            subCommand: type,
+            params: parts.sublist(2),
+            rawResponse: responseStr,
+          ));
+          // Don't process through normal pipeline
+          if (type != Protocol.typeStatusQuery) return;
+        }
 
         // Check if this is a status query response (Format 4)
         if (type == Protocol.typeStatusQuery && parts.length >= 24) {
@@ -296,7 +321,20 @@ class MqttService extends ChangeNotifier {
         }
 
         final statusValue = int.parse(parts[2]);
-        final isOk = statusValue == 1; // 1 = success
+        bool isOk;
+
+        // Handle different response formats:
+        // - If statusValue is large (>100), it's likely a data_size field, not status
+        //   (e.g., "0x45 1 8192" = success with 8192 FFT points)
+        // - If statusValue is small (<=10), it's a status code (1=success, 0=fail)
+        if (statusValue > 100) {
+          // This is likely "0x45 <type> <data_size>" format for Single FFT
+          // Treat as success
+          isOk = true;
+        } else {
+          // This is "0x45 <type> <status>" format
+          isOk = statusValue == 1; // 1 = success
+        }
 
         if (parts.length >= 5) {
           // Format 3: includes iteration info
@@ -304,7 +342,7 @@ class MqttService extends ChangeNotifier {
           final totalCount = int.parse(parts[4]);
           _processResponse(type, isOk, currentIter: currentIter, totalCount: totalCount);
         } else {
-          // Format 2: legacy format
+          // Format 2: legacy format or data_size format
           _processResponse(type, isOk);
         }
       }
@@ -378,6 +416,7 @@ class MqttService extends ChangeNotifier {
     _iqDataController.close();
     _logController.close();
     _statusController.close();
+    _registerResponseController.close();
     super.dispose();
   }
 }
@@ -400,4 +439,17 @@ class MqttResponse {
 
   bool get isOk => isSuccess;
   String get statusMessage => isSuccess ? 'OK' : 'FAIL';
+}
+
+/// Register response for sub-commands 0x10-0x4F
+class RegisterResponse {
+  final int subCommand;
+  final List<String> params;
+  final String rawResponse;
+
+  RegisterResponse({
+    required this.subCommand,
+    required this.params,
+    required this.rawResponse,
+  });
 }

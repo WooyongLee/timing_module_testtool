@@ -14,8 +14,8 @@ class SpectrumChart extends StatelessWidget {
     super.key,
     this.spectrumData,
     this.maxHoldData,
-    this.yMin = 60,
-    this.yMax = 180,
+    this.yMin = 40,
+    this.yMax = 160,
     this.showPeakMarker = true,
     this.downsampleFactor = 8, // 8192 / 8 = 1024 points for display
   });
