@@ -50,15 +50,16 @@ static volatile int g_thread_running = 0;
 
 /* Spectrum parameters for thread */
 static struct {
-    uint64_t center_freq_khz;
-    uint32_t rbw_idx;
-    uint32_t maxhold;
+    uint64_t center_freq_hz;
+    uint32_t rbw_hz;
+    uint32_t fft_size;
 } g_spectrum_params;
 
 /* IQ capture parameters for thread */
 static struct {
-    uint64_t center_freq_khz;
-    uint32_t sample_count;
+    uint64_t center_freq_hz;
+    uint32_t rbw_hz;
+    uint32_t iq_byte_size;
 } g_iq_params;
 
 /*
@@ -122,16 +123,15 @@ void test_6144_deinit(void)
 }
 
 /*
- * Set center frequency
+ * Set center frequency (in Hz)
  */
-static int set_center_frequency(uint64_t freq_khz)
+static int set_center_frequency(uint64_t freq_hz)
 {
     char cmd[128];
-    uint64_t freq_hz = freq_khz * 1000ULL;
 
     /* Validate frequency range: 60MHz to 6GHz */
-    if (freq_khz < 60000 || freq_khz > 6000000) {
-    	printf("[TEST_6144] Invalid frequency: %llu kHz (valid: 60000-6000000)\n", freq_khz);
+    if (freq_hz < 60000000ULL || freq_hz > 6000000000ULL) {
+    	printf("[TEST_6144] Invalid frequency: %llu Hz (valid: 60000000-6000000000)\n", freq_hz);
         return -1;
     }
 
@@ -139,9 +139,23 @@ static int set_center_frequency(uint64_t freq_khz)
     sprintf(cmd, "echo %llu > /sys/bus/iio/devices/iio:device0/out_altvoltage0_RX_LO_frequency", freq_hz);
     system(cmd);
 
-    printf("[TEST_6144] Set center frequency: %llu kHz (%llu Hz)\n", freq_khz, freq_hz);
+    printf("[TEST_6144] Set center frequency: %llu Hz\n", freq_hz);
 
     return 0;
+}
+
+/*
+ * Convert RBW Hz to index
+ */
+static int rbw_hz_to_index(uint32_t rbw_hz)
+{
+    switch (rbw_hz) {
+        case 15000:  return 0;
+        case 30000:  return 1;
+        case 60000:  return 2;
+        case 120000: return 3;
+        default:     return 2;  /* Default to 60kHz */
+    }
 }
 
 /*
@@ -151,12 +165,12 @@ static void* spectrum_thread_func(void* arg)
 {
     char resp_msg[128];
     int32_t* spectrum_data = NULL;
-    int i;
+    uint32_t fft_size = g_spectrum_params.fft_size;
 
     printf("[TEST_6144] Spectrum thread started\n");
 
-    /* Allocate spectrum data buffer (8192 points * 4 bytes) */
-    spectrum_data = (int32_t*)malloc(TEST_6144_SPECTRUM_POINTS * sizeof(int32_t));
+    /* Allocate spectrum data buffer (fft_size points * 4 bytes) */
+    spectrum_data = (int32_t*)malloc(fft_size * sizeof(int32_t));
     if (!spectrum_data) {
     	printf("[TEST_6144] Failed to allocate spectrum buffer\n");
         sprintf(resp_msg, "%s %02x %d", CMD_61_44_TEST_RESP, TYPE_61_44_SPECTRUM, TEST_6144_STATUS_ERROR);
@@ -165,8 +179,8 @@ static void* spectrum_thread_func(void* arg)
         return NULL;
     }
 
-    /* Set center frequency */
-    if (set_center_frequency(g_spectrum_params.center_freq_khz) < 0) {
+    /* Set center frequency (now in Hz) */
+    if (set_center_frequency(g_spectrum_params.center_freq_hz) < 0) {
         sprintf(resp_msg, "%s %02x %d", CMD_61_44_TEST_RESP, TYPE_61_44_SPECTRUM, TEST_6144_STATUS_ERROR);
         pubMqttString(resp_msg, strlen(resp_msg));
         free(spectrum_data);
@@ -174,51 +188,43 @@ static void* spectrum_thread_func(void* arg)
         return NULL;
     }
 
-    g_state.current_freq = g_spectrum_params.center_freq_khz;
-    g_state.current_rbw = g_spectrum_params.rbw_idx;
+    g_state.current_freq = g_spectrum_params.center_freq_hz / 1000;  /* Store as kHz internally */
+    g_state.current_rbw = rbw_hz_to_index(g_spectrum_params.rbw_hz);
 
     /* Configure FPGA for spectrum capture */
     PL_CTRL_Write(SA_EN, 1);
     PL_CTRL_Write(SA_CAPT_MODE, 1);  /* General mode */
 
+    /* Set FFT size in FPGA */
+    PL_CTRL_Write(COUNTER1_PERIOD, fft_size);
+
     /* Allow settling time */
     usleep(10000);
 
-    while (g_thread_running) {
-        /* Trigger capture */
-        PL_CTRL_Write(SA_MEASURE_START, 1);
-        usleep(1000);
-        PL_CTRL_Write(SA_MEASURE_START, 0);
+    /* Trigger capture */
+    PL_CTRL_Write(SA_MEASURE_START, 1);
+    usleep(1000);
+    PL_CTRL_Write(SA_MEASURE_START, 0);
 
-        /* Wait for capture complete */
-        usleep(50000);  /* 50ms for 61.44MHz capture */
+    /* Wait for capture complete */
+    usleep(50000);  /* 50ms for 61.44MHz capture */
 
-        /* Read spectrum data from DRAM */
-        int32_t* dram_buffer = (int32_t*)get_DRAM_buffer();
-        if (dram_buffer) {
-            memcpy(spectrum_data, dram_buffer, TEST_6144_SPECTRUM_POINTS * sizeof(int32_t));
-        }
-
-        /* Apply maxhold if enabled */
-        /* (maxhold logic can be added here if needed) */
-
-        /* Send data via MQTT */
-        /* Format: 0x45 0x01 <status> followed by binary data */
-        sprintf(resp_msg, "%s %02x %d %llu %u",
-                CMD_61_44_TEST_RESP, TYPE_61_44_SPECTRUM, TEST_6144_STATUS_OK,
-                g_spectrum_params.center_freq_khz, TEST_6144_SPECTRUM_POINTS);
-        pubMqttString(resp_msg, strlen(resp_msg));
-
-        /* Send spectrum data as int array */
-        pubMqttDataByteArray(spectrum_data, TEST_6144_SPECTRUM_POINTS * sizeof(int32_t));
-
-        /* For single shot, break after first capture */
-        if (!g_spectrum_params.maxhold) {
-            break;
-        }
-
-        usleep(100000);  /* 100ms between captures in maxhold mode */
+    /* Read spectrum data from DRAM */
+    int32_t* dram_buffer = (int32_t*)get_DRAM_buffer();
+    if (dram_buffer) {
+        memcpy(spectrum_data, dram_buffer, fft_size * sizeof(int32_t));
     }
+
+    /* Send response header */
+    /* Format: 0x45 0x01 <status> */
+    sprintf(resp_msg, "%s %02x OK", CMD_61_44_TEST_RESP, TYPE_61_44_SPECTRUM);
+    pubMqttString(resp_msg, strlen(resp_msg));
+
+    /* Send spectrum data as binary */
+    pubMqttDataByteArray(spectrum_data, fft_size * sizeof(int32_t));
+
+    printf("[TEST_6144] Spectrum data sent: freq=%llu Hz, rbw=%u Hz, fft_size=%u\n",
+           g_spectrum_params.center_freq_hz, g_spectrum_params.rbw_hz, fft_size);
 
     free(spectrum_data);
     g_state.running = 0;
@@ -235,19 +241,18 @@ static void* spectrum_thread_func(void* arg)
 static void* iq_capture_thread_func(void* arg)
 {
     char resp_msg[128];
-    int16_t* iq_data = NULL;
-    uint32_t actual_samples;
+    int8_t* iq_data = NULL;
+    uint32_t iq_byte_size = g_iq_params.iq_byte_size;
 
     printf("[TEST_6144] IQ capture thread started\n");
 
-    /* Limit sample count */
-    actual_samples = g_iq_params.sample_count;
-    if (actual_samples > TEST_6144_MAX_IQ_SAMPLES) {
-        actual_samples = TEST_6144_MAX_IQ_SAMPLES;
+    /* Limit byte size (max samples * 4 bytes per I/Q pair) */
+    if (iq_byte_size > TEST_6144_MAX_IQ_SAMPLES * 4) {
+        iq_byte_size = TEST_6144_MAX_IQ_SAMPLES * 4;
     }
 
-    /* Allocate IQ data buffer (I + Q = 2 * samples * 2 bytes) */
-    iq_data = (int16_t*)malloc(actual_samples * 2 * sizeof(int16_t));
+    /* Allocate IQ data buffer */
+    iq_data = (int8_t*)malloc(iq_byte_size);
     if (!iq_data) {
     	printf("[TEST_6144] Failed to allocate IQ buffer\n");
         sprintf(resp_msg, "%s %02x %d", CMD_61_44_TEST_RESP, TYPE_61_44_IQ_CAPTURE, TEST_6144_STATUS_ERROR);
@@ -256,8 +261,8 @@ static void* iq_capture_thread_func(void* arg)
         return NULL;
     }
 
-    /* Set center frequency */
-    if (set_center_frequency(g_iq_params.center_freq_khz) < 0) {
+    /* Set center frequency (now in Hz) */
+    if (set_center_frequency(g_iq_params.center_freq_hz) < 0) {
         sprintf(resp_msg, "%s %02x %d", CMD_61_44_TEST_RESP, TYPE_61_44_IQ_CAPTURE, TEST_6144_STATUS_ERROR);
         pubMqttString(resp_msg, strlen(resp_msg));
         free(iq_data);
@@ -265,14 +270,16 @@ static void* iq_capture_thread_func(void* arg)
         return NULL;
     }
 
-    g_state.current_freq = g_iq_params.center_freq_khz;
+    g_state.current_freq = g_iq_params.center_freq_hz / 1000;  /* Store as kHz internally */
+    g_state.current_rbw = rbw_hz_to_index(g_iq_params.rbw_hz);
 
     /* Configure for IQ capture mode */
     PL_CTRL_Write(SA_EN, 1);
     PL_CTRL_Write(SA_CAPT_MODE, 0);  /* IQ capture mode */
 
-    /* Set sample count in FPGA */
-    PL_CTRL_Write(COUNTER1_PERIOD, actual_samples);
+    /* Set sample count in FPGA (byte_size / 4 = number of I/Q pairs) */
+    uint32_t sample_count = iq_byte_size / 4;
+    PL_CTRL_Write(COUNTER1_PERIOD, sample_count);
 
     usleep(10000);
 
@@ -282,23 +289,25 @@ static void* iq_capture_thread_func(void* arg)
     PL_CTRL_Write(SA_MEASURE_START, 0);
 
     /* Wait for capture (samples / sample_rate * 1000000 us + margin) */
-    uint32_t capture_time_us = (actual_samples * 1000000ULL / TEST_6144_SAMPLE_RATE) + 10000;
+    uint32_t capture_time_us = (sample_count * 1000000ULL / TEST_6144_SAMPLE_RATE) + 10000;
     usleep(capture_time_us);
 
     /* Read IQ data from DRAM */
-    int16_t* dram_buffer = (int16_t*)get_DRAM_buffer();
+    int8_t* dram_buffer = (int8_t*)get_DRAM_buffer();
     if (dram_buffer) {
-        memcpy(iq_data, dram_buffer, actual_samples * 2 * sizeof(int16_t));
+        memcpy(iq_data, dram_buffer, iq_byte_size);
     }
 
     /* Send response header */
-    sprintf(resp_msg, "%s %02x %d %llu %u",
-            CMD_61_44_TEST_RESP, TYPE_61_44_IQ_CAPTURE, TEST_6144_STATUS_OK,
-            g_iq_params.center_freq_khz, actual_samples);
+    /* Format: 0x45 0x02 OK */
+    sprintf(resp_msg, "%s %02x OK", CMD_61_44_TEST_RESP, TYPE_61_44_IQ_CAPTURE);
     pubMqttString(resp_msg, strlen(resp_msg));
 
     /* Send IQ data */
-    pubMqttDataByteArray((int*)iq_data, actual_samples * 2 * sizeof(int16_t));
+    pubMqttDataByteArray((int*)iq_data, iq_byte_size);
+
+    printf("[TEST_6144] IQ data sent: freq=%llu Hz, rbw=%u Hz, bytes=%u\n",
+           g_iq_params.center_freq_hz, g_iq_params.rbw_hz, iq_byte_size);
 
     free(iq_data);
     g_state.running = 0;
@@ -312,7 +321,7 @@ static void* iq_capture_thread_func(void* arg)
 /*
  * Start spectrum measurement
  */
-int test_6144_spectrum_start(uint64_t center_freq_khz, uint32_t rbw_idx, uint32_t maxhold)
+int test_6144_spectrum_start(uint64_t center_freq_hz, uint32_t rbw_hz, uint32_t fft_size)
 {
     char resp_msg[64];
 
@@ -334,15 +343,20 @@ int test_6144_spectrum_start(uint64_t center_freq_khz, uint32_t rbw_idx, uint32_
         return -2;
     }
 
-    /* Validate RBW index */
-    if (rbw_idx > 3) {
-        rbw_idx = TEST_6144_DEFAULT_RBW_IDX;
+    /* Validate and default RBW */
+    if (rbw_hz != 15000 && rbw_hz != 30000 && rbw_hz != 60000 && rbw_hz != 120000) {
+        rbw_hz = 60000;  /* Default to 60kHz */
+    }
+
+    /* Validate FFT size */
+    if (fft_size == 0 || fft_size > TEST_6144_MAX_IQ_SAMPLES) {
+        fft_size = TEST_6144_SPECTRUM_POINTS;  /* Default to 8192 */
     }
 
     /* Store parameters for thread */
-    g_spectrum_params.center_freq_khz = center_freq_khz;
-    g_spectrum_params.rbw_idx = rbw_idx;
-    g_spectrum_params.maxhold = maxhold;
+    g_spectrum_params.center_freq_hz = center_freq_hz;
+    g_spectrum_params.rbw_hz = rbw_hz;
+    g_spectrum_params.fft_size = fft_size;
 
     g_state.running = 1;
     g_thread_running = 1;
@@ -360,8 +374,8 @@ int test_6144_spectrum_start(uint64_t center_freq_khz, uint32_t rbw_idx, uint32_
         return -3;
     }
 
-    printf("[TEST_6144] Spectrum measurement started: freq=%llu kHz, rbw=%u, maxhold=%u\n",
-               center_freq_khz, rbw_idx, maxhold);
+    printf("[TEST_6144] Spectrum measurement started: freq=%llu Hz, rbw=%u Hz, fft_size=%u\n",
+               center_freq_hz, rbw_hz, fft_size);
 
     return 0;
 }
@@ -369,7 +383,7 @@ int test_6144_spectrum_start(uint64_t center_freq_khz, uint32_t rbw_idx, uint32_
 /*
  * Start IQ data capture
  */
-int test_6144_iq_capture_start(uint64_t center_freq_khz, uint32_t sample_count)
+int test_6144_iq_capture_start(uint64_t center_freq_hz, uint32_t rbw_hz, uint32_t iq_byte_size)
 {
     char resp_msg[64];
 
@@ -391,9 +405,20 @@ int test_6144_iq_capture_start(uint64_t center_freq_khz, uint32_t sample_count)
         return -2;
     }
 
+    /* Validate and default RBW */
+    if (rbw_hz != 15000 && rbw_hz != 30000 && rbw_hz != 60000 && rbw_hz != 120000) {
+        rbw_hz = 60000;  /* Default to 60kHz */
+    }
+
+    /* Validate byte size */
+    if (iq_byte_size == 0 || iq_byte_size > TEST_6144_MAX_IQ_SAMPLES * 4) {
+        iq_byte_size = 8192 * 4;  /* Default to 8192 samples * 4 bytes */
+    }
+
     /* Store parameters for thread */
-    g_iq_params.center_freq_khz = center_freq_khz;
-    g_iq_params.sample_count = sample_count;
+    g_iq_params.center_freq_hz = center_freq_hz;
+    g_iq_params.rbw_hz = rbw_hz;
+    g_iq_params.iq_byte_size = iq_byte_size;
 
     g_state.running = 1;
     g_thread_running = 1;
@@ -411,8 +436,8 @@ int test_6144_iq_capture_start(uint64_t center_freq_khz, uint32_t sample_count)
         return -3;
     }
 
-    printf("[TEST_6144] IQ capture started: freq=%llu kHz, samples=%u\n",
-               center_freq_khz, sample_count);
+    printf("[TEST_6144] IQ capture started: freq=%llu Hz, rbw=%u Hz, bytes=%u\n",
+               center_freq_hz, rbw_hz, iq_byte_size);
 
     return 0;
 }
@@ -465,18 +490,18 @@ Test6144_State* test_6144_get_state(void)
 /*
  * MQTT command handler
  * Protocol format:
- *   0x44 0x00                                      - Initialize
- *   0x44 0x01 <center_freq_khz> <rbw_idx> <maxhold> - Spectrum
- *   0x44 0x02 <center_freq_khz> <sample_count>     - IQ capture
- *   0x44 0x0F                                      - Stop
+ *   0x44 0x00                                       - Initialize
+ *   0x44 0x01 <freq_hz> <rbw_hz> <fft_size>        - Spectrum/FFT
+ *   0x44 0x02 <freq_hz> <rbw_hz> <iq_byte_size>    - IQ capture
+ *   0x44 0x0F                                       - Stop
  */
 int test_6144_mqtt_handler(const char* mesg)
 {
     uint32_t cmd_mode = 0;
     uint32_t test_type = 0;
-    uint64_t center_freq_khz = 2000000;  /* Default 2GHz */
-    uint32_t param1 = 0;
-    uint32_t param2 = 0;
+    uint64_t center_freq_hz = 2000000000ULL;  /* Default 2GHz in Hz */
+    uint32_t rbw_hz = 60000;                   /* Default 60kHz */
+    uint32_t param3 = 0;
     int scanned;
 
     /* Parse command type */
@@ -494,31 +519,34 @@ int test_6144_mqtt_handler(const char* mesg)
             return test_6144_init();
 
         case TYPE_61_44_SPECTRUM:
-            /* 0x44 0x01 <center_freq_khz> <rbw_idx> <maxhold> */
+            /* 0x44 0x01 <freq_hz> <rbw_hz> <fft_size> */
             scanned = sscanf(mesg, "%x %x %llu %u %u", &cmd_mode, &test_type,
-                           &center_freq_khz, &param1, &param2);
+                           &center_freq_hz, &rbw_hz, &param3);
             if (scanned < 3) {
-                center_freq_khz = 2000000;  /* Default 2GHz */
+                center_freq_hz = 2000000000ULL;  /* Default 2GHz */
             }
             if (scanned < 4) {
-                param1 = TEST_6144_DEFAULT_RBW_IDX;  /* Default RBW */
+                rbw_hz = 60000;  /* Default 60kHz */
             }
             if (scanned < 5) {
-                param2 = 0;  /* MaxHold off */
+                param3 = TEST_6144_SPECTRUM_POINTS;  /* Default FFT size */
             }
-            return test_6144_spectrum_start(center_freq_khz, param1, param2);
+            return test_6144_spectrum_start(center_freq_hz, rbw_hz, param3);
 
         case TYPE_61_44_IQ_CAPTURE:
-            /* 0x44 0x02 <center_freq_khz> <sample_count> */
-            scanned = sscanf(mesg, "%x %x %llu %u", &cmd_mode, &test_type,
-                           &center_freq_khz, &param1);
+            /* 0x44 0x02 <freq_hz> <rbw_hz> <iq_byte_size> */
+            scanned = sscanf(mesg, "%x %x %llu %u %u", &cmd_mode, &test_type,
+                           &center_freq_hz, &rbw_hz, &param3);
             if (scanned < 3) {
-                center_freq_khz = 2000000;  /* Default 2GHz */
+                center_freq_hz = 2000000000ULL;  /* Default 2GHz */
             }
             if (scanned < 4) {
-                param1 = 8192;  /* Default sample count */
+                rbw_hz = 60000;  /* Default 60kHz */
             }
-            return test_6144_iq_capture_start(center_freq_khz, param1);
+            if (scanned < 5) {
+                param3 = 8192 * 4;  /* Default: 8192 samples * 4 bytes */
+            }
+            return test_6144_iq_capture_start(center_freq_hz, rbw_hz, param3);
 
         case TYPE_61_44_STOP:
             /* 0x44 0x0F */

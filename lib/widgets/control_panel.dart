@@ -3,6 +3,9 @@ import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../services/mqtt_service.dart';
+import '../services/tcp_server_service.dart';
+import '../services/transport_service.dart';
+import '../services/transport_manager.dart';
 import '../services/app_state.dart';
 import '../services/file_service.dart';
 import '../constants/protocol.dart';
@@ -18,14 +21,36 @@ class ControlPanel extends StatefulWidget {
 }
 
 class _ControlPanelState extends State<ControlPanel> {
-  final _ipController = TextEditingController(text: Protocol.defaultIp);
+  final _ipController   = TextEditingController(text: Protocol.defaultIp);
+  final _portController = TextEditingController(text: '${Protocol.tcpServerPort}');
+
+  List<String> _localIps = [];
   final _freqController = TextEditingController(text: '3000');
   final _captureLengthController = TextEditingController(text: '16384');
   final _fftLengthController = TextEditingController(text: '8192');
   final _repeatCountController = TextEditingController(text: '10');
 
+  // T-Sync parameter controllers
+  final _tsyncSamplesController   = TextEditingController(text: '2600000');
+  final _tsyncHoTimeController    = TextEditingController(text: '30');
+  final _tsyncDacController       = TextEditingController(text: '32768');
+  final _tsyncRunNumberController = TextEditingController(text: '1');
+  final _tsyncLoopCountController = TextEditingController(text: '0');
+  final _tsyncDelayMsController   = TextEditingController(text: '500');
+
   // Track if controllers are initialized
   bool _controllersInitialized = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadLocalIps();
+  }
+
+  Future<void> _loadLocalIps() async {
+    final ips = await TcpServerService.getLocalIpAddresses();
+    if (mounted) setState(() => _localIps = ips);
+  }
 
   // Status query subscription and timeout timer
   StreamSubscription? _statusSubscription;
@@ -35,10 +60,17 @@ class _ControlPanelState extends State<ControlPanel> {
   @override
   void dispose() {
     _ipController.dispose();
+    _portController.dispose();
     _freqController.dispose();
     _captureLengthController.dispose();
     _fftLengthController.dispose();
     _repeatCountController.dispose();
+    _tsyncSamplesController.dispose();
+    _tsyncHoTimeController.dispose();
+    _tsyncDacController.dispose();
+    _tsyncRunNumberController.dispose();
+    _tsyncLoopCountController.dispose();
+    _tsyncDelayMsController.dispose();
     _statusSubscription?.cancel();
     _statusTimeoutTimer?.cancel();
     super.dispose();
@@ -61,8 +93,9 @@ class _ControlPanelState extends State<ControlPanel> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer2<MqttService, AppState>(
-      builder: (context, mqtt, appState, child) {
+    return Consumer2<TransportManager, AppState>(
+      builder: (context, manager, appState, child) {
+        final mqtt = manager.active;
         // Initialize controllers only once
         _initControllersOnce(appState);
 
@@ -75,17 +108,36 @@ class _ControlPanelState extends State<ControlPanel> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // IP Section
+              // Transport Mode Toggle
               _buildSection(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _buildLabel('IP'),
-                    _buildIpInput(mqtt),
+                    _buildLabel('Mode'),
+                    _buildModeToggle(manager, mqtt),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+
+              // IP / Port Section
+              _buildSection(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildLabel(manager.mode == TransportMode.mqtt ? 'IP' : 'Port'),
+                    manager.mode == TransportMode.mqtt
+                        ? _buildIpInput(mqtt)
+                        : _buildPortInput(mqtt),
+                    if (manager.mode == TransportMode.tcpServer &&
+                        _localIps.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      _buildLocalIpHint(),
+                    ],
                     const SizedBox(height: 8),
                     Row(
                       children: [
-                        Expanded(child: _buildConnectButton(mqtt)),
+                        Expanded(child: _buildConnectButton(manager, mqtt)),
                         const SizedBox(width: 4),
                         _buildRegisterButton(mqtt),
                       ],
@@ -95,17 +147,19 @@ class _ControlPanelState extends State<ControlPanel> {
               ),
               const Divider(height: 1),
 
-              // Single Request Button (FFT or IQ Capture)
-              _buildSection(
-                child: _buildSingleRequestButton(mqtt, appState),
-              ),
-              const Divider(height: 1),
+              // Single Request / Init AD9361 (hidden in tsync mode)
+              if (appState.viewMode != ViewMode.tsync) ...[
+                _buildSection(
+                  child: _buildSingleRequestButton(mqtt, appState),
+                ),
+                const Divider(height: 1),
 
-              // Status Query Button
-              _buildSection(
-                child: _buildStatusQueryButton(mqtt),
-              ),
-              const Divider(height: 1),
+                // Status Query Button
+                _buildSection(
+                  child: _buildStatusQueryButton(mqtt),
+                ),
+                const Divider(height: 1),
+              ],
 
               // Meas. Type Section
               _buildSection(
@@ -119,43 +173,47 @@ class _ControlPanelState extends State<ControlPanel> {
               ),
               const Divider(height: 1),
 
-              // Frequency Section
-              _buildSection(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _buildLabel('Frequency'),
-                    _buildFrequencyInput(appState),
-                  ],
+              // Frequency Section (hidden in tsync mode)
+              if (appState.viewMode != ViewMode.tsync) ...[
+                _buildSection(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildLabel('Frequency'),
+                      _buildFrequencyInput(appState),
+                    ],
+                  ),
                 ),
-              ),
-              const Divider(height: 1),
+                const Divider(height: 1),
+              ],
 
-              // RBW Section
-              _buildSection(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _buildLabel('RBW'),
-                    _buildRbwDropdown(appState),
-                  ],
+              // RBW Section (hidden in tsync mode)
+              if (appState.viewMode != ViewMode.tsync) ...[
+                _buildSection(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildLabel('RBW'),
+                      _buildRbwDropdown(appState),
+                    ],
+                  ),
                 ),
-              ),
-              const Divider(height: 1),
+                const Divider(height: 1),
 
-              // Max Hold Section (Spectrum only)
-              _buildSection(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _buildLabel('Max Hold'),
-                    _buildMaxHoldDropdown(appState),
-                    const SizedBox(height: 6),
-                    _buildMaxHoldClearButton(appState),
-                  ],
+                // Max Hold Section
+                _buildSection(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildLabel('Max Hold'),
+                      _buildMaxHoldDropdown(appState),
+                      const SizedBox(height: 6),
+                      _buildMaxHoldClearButton(appState),
+                    ],
+                  ),
                 ),
-              ),
-              const Divider(height: 1),
+                const Divider(height: 1),
+              ],
 
               // Spectrum specific controls
               if (appState.viewMode == ViewMode.spectrum) ...[
@@ -235,6 +293,195 @@ class _ControlPanelState extends State<ControlPanel> {
                 const Divider(height: 1),
               ],
 
+              // tsync specific controls
+              if (appState.viewMode == ViewMode.tsync) ...[
+                // ── Init ─────────────────────────────────────────
+                _buildSection(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildLabel('ACQ Init'),
+                      SizedBox(
+                        height: 28,
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: mqtt.isConnected ? () => appState.tsyncInit() : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: appState.tsyncInitialized ? Colors.green[600] : Colors.orange[700],
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                          ),
+                          child: Text(
+                            appState.tsyncInitialized ? 'Initialized' : 'acqinit',
+                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1),
+                // ── Param ────────────────────────────────────────
+                _buildSection(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildLabel('ACQ Param'),
+                      _buildTsyncLabeledInput('Samples', _tsyncSamplesController, (v) {
+                        final n = int.tryParse(v);
+                        if (n != null) appState.tsyncSamples = n;
+                      }),
+                      const SizedBox(height: 4),
+                      _buildTsyncLabeledInput('HO Time(s)', _tsyncHoTimeController, (v) {
+                        final n = int.tryParse(v);
+                        if (n != null) appState.tsyncHoTime = n;
+                      }),
+                      const SizedBox(height: 4),
+                      _buildTsyncLabeledInput('DAC', _tsyncDacController, (v) {
+                        final n = int.tryParse(v);
+                        if (n != null) appState.tsyncDac = n;
+                      }),
+                      const SizedBox(height: 6),
+                      SizedBox(
+                        height: 26,
+                        width: double.infinity,
+                        child: OutlinedButton(
+                          onPressed: mqtt.isConnected ? () => appState.tsyncApplyParam() : null,
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: Colors.teal,
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                          ),
+                          child: const Text('Apply Param', style: TextStyle(fontSize: 11)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1),
+                // ── ACQ Run ──────────────────────────────────────
+                _buildSection(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildLabel('ACQ Run'),
+                      _buildTsyncLabeledInput('Run Number', _tsyncRunNumberController, (v) {
+                        final n = int.tryParse(v);
+                        if (n != null && n > 0) appState.tsyncRunNumber = n;
+                      }),
+                      const SizedBox(height: 6),
+                      SizedBox(
+                        height: 28,
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: mqtt.isConnected && !appState.tsyncRunning && !appState.tsyncLooping
+                              ? () {
+                                  final n = int.tryParse(_tsyncRunNumberController.text);
+                                  if (n != null && n > 0) appState.tsyncRunNumber = n;
+                                  appState.tsyncRun();
+                                }
+                              : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blue[600],
+                            foregroundColor: Colors.white,
+                            padding: EdgeInsets.zero,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                          ),
+                          child: appState.tsyncRunning
+                              ? const SizedBox(
+                                  width: 14, height: 14,
+                                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                )
+                              : const Text('Run', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1),
+                // ── ACQ Loop ─────────────────────────────────────
+                _buildSection(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildLabel('ACQ Loop'),
+                      _buildTsyncLabeledInput('Iterations', _tsyncLoopCountController, (v) {
+                        final n = int.tryParse(v);
+                        if (n != null && n >= 0) appState.tsyncLoopCount = n;
+                      }),
+                      const SizedBox(height: 4),
+                      _buildTsyncLabeledInput('Delay(ms)', _tsyncDelayMsController, (v) {
+                        final n = int.tryParse(v);
+                        if (n != null && n >= 0) appState.tsyncDelayMs = n;
+                      }),
+                      const SizedBox(height: 6),
+                      SizedBox(
+                        height: 28,
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: mqtt.isConnected && !appState.tsyncRunning
+                              ? appState.tsyncLooping
+                                  ? () => appState.tsyncStop()
+                                  : () {
+                                      final count = int.tryParse(_tsyncLoopCountController.text);
+                                      if (count != null && count >= 0) appState.tsyncLoopCount = count;
+                                      final delay = int.tryParse(_tsyncDelayMsController.text);
+                                      if (delay != null && delay >= 0) appState.tsyncDelayMs = delay;
+                                      appState.tsyncLoop();
+                                    }
+                              : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: appState.tsyncLooping ? Colors.red[600] : Colors.green[600],
+                            foregroundColor: Colors.white,
+                            padding: EdgeInsets.zero,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                          ),
+                          child: Text(
+                            appState.tsyncLooping ? 'Stop' : 'Loop',
+                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1),
+                // ── Save CSV ─────────────────────────────────────
+                _buildSection(
+                  child: SizedBox(
+                    height: 28,
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: appState.tsyncResults.isNotEmpty
+                          ? () async {
+                              final path = await appState.tsyncExportCsv();
+                              if (!context.mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    path != null ? 'Saved: $path' : 'Export failed (no data or error)',
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                                  duration: const Duration(seconds: 4),
+                                  backgroundColor: path != null ? Colors.green[700] : Colors.red[700],
+                                ),
+                              );
+                            }
+                          : null,
+                      icon: const Icon(Icons.download, size: 14),
+                      label: const Text('Save CSV', style: TextStyle(fontSize: 12)),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.teal,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                      ),
+                    ),
+                  ),
+                ),
+                const Divider(height: 1),
+              ],
+
               // Spacer
               const Expanded(child: SizedBox()),
 
@@ -268,7 +515,7 @@ class _ControlPanelState extends State<ControlPanel> {
     );
   }
 
-  Widget _buildIpInput(MqttService mqtt) {
+  Widget _buildIpInput(TransportService mqtt) {
     return Row(
       children: [
         Expanded(
@@ -294,34 +541,149 @@ class _ControlPanelState extends State<ControlPanel> {
     );
   }
 
-  Widget _buildConnectButton(MqttService mqtt) {
+  /// Shows local IPv4 addresses — the IP to write in tcp_server.conf.
+  Widget _buildLocalIpHint() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.teal[50],
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: Colors.teal[200]!),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Local IP (for tcp_server.conf):',
+            style: TextStyle(fontSize: 9, color: Colors.teal[700]),
+          ),
+          ..._localIps.map((ip) => GestureDetector(
+                onTap: () {
+                  Clipboard.setData(ClipboardData(text: ip));
+                },
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        ip,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.teal[800],
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    Icon(Icons.copy, size: 11, color: Colors.teal[400]),
+                  ],
+                ),
+              )),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPortInput(TransportService mqtt) {
     return SizedBox(
       height: 28,
-      child: ElevatedButton(
-        onPressed: mqtt.connectionState == ConnectionState.connecting
-            ? null
-            : () {
-                if (mqtt.isConnected) {
-                  mqtt.disconnect();
-                } else {
-                  mqtt.connect(_ipController.text);
-                }
-              },
-        style: ElevatedButton.styleFrom(
-          backgroundColor: mqtt.isConnected ? Colors.red[400] : Colors.blue[400],
-          foregroundColor: Colors.white,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+      child: TextField(
+        controller: _portController,
+        enabled: !mqtt.isConnected,
+        keyboardType: TextInputType.number,
+        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+        decoration: InputDecoration(
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(4)),
+          filled: true,
+          fillColor: Colors.white,
         ),
-        child: Text(
-          mqtt.isConnected ? 'Disconnect' : 'Connect',
-          style: const TextStyle(fontSize: 12),
+        style: const TextStyle(fontSize: 12),
+      ),
+    );
+  }
+
+  Widget _buildModeToggle(TransportManager manager, TransportService mqtt) {
+    return Container(
+      height: 28,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: Colors.grey[400]!),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<TransportMode>(
+          value: manager.mode,
+          isExpanded: true,
+          isDense: true,
+          icon: const Icon(Icons.arrow_drop_down, size: 18),
+          items: const [
+            DropdownMenuItem(
+              value: TransportMode.mqtt,
+              child: Text('MQTT', style: TextStyle(fontSize: 12)),
+            ),
+            DropdownMenuItem(
+              value: TransportMode.tcpServer,
+              child: Text('TCP Server', style: TextStyle(fontSize: 12)),
+            ),
+          ],
+          onChanged: mqtt.isConnected
+              ? null
+              : (value) {
+                  if (value != null) manager.switchMode(value);
+                },
         ),
       ),
     );
   }
 
-  Widget _buildRegisterButton(MqttService mqtt) {
+  Widget _buildConnectButton(TransportManager manager, TransportService mqtt) {
+    final isTcpMode = manager.mode == TransportMode.tcpServer;
+    final isListening = isTcpMode &&
+        mqtt.connectionState == ConnectionState.connecting;
+
+    String label;
+    if (mqtt.isConnected) {
+      label = 'Stop';
+    } else if (isListening) {
+      label = 'Listening...';
+    } else {
+      label = isTcpMode ? 'Listen' : 'Connect';
+    }
+
+    return SizedBox(
+      height: 28,
+      child: ElevatedButton(
+        onPressed: isListening && !mqtt.isConnected
+            ? () => mqtt.disconnect()
+            : mqtt.connectionState == ConnectionState.connecting && !isTcpMode
+                ? null
+                : () {
+                    if (mqtt.isConnected || isListening) {
+                      mqtt.disconnect();
+                    } else {
+                      final address = isTcpMode
+                          ? _portController.text
+                          : _ipController.text;
+                      mqtt.connect(address);
+                    }
+                  },
+        style: ElevatedButton.styleFrom(
+          backgroundColor: mqtt.isConnected
+              ? Colors.red[400]
+              : isListening
+                  ? Colors.orange[400]
+                  : Colors.blue[400],
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+        ),
+        child: Text(label, style: const TextStyle(fontSize: 12)),
+      ),
+    );
+  }
+
+  Widget _buildRegisterButton(TransportService mqtt) {
     return SizedBox(
       height: 28,
       width: 28,
@@ -342,7 +704,7 @@ class _ControlPanelState extends State<ControlPanel> {
     );
   }
 
-  Widget _buildSingleRequestButton(MqttService mqtt, AppState appState) {
+  Widget _buildSingleRequestButton(TransportService mqtt, AppState appState) {
     final isEnabled = mqtt.isConnected && !appState.isMeasuring;
     final isSpectrum = appState.viewMode == ViewMode.spectrum;
     final buttonText = isSpectrum ? 'Single FFT' : 'IQ Capture';
@@ -486,6 +848,10 @@ class _ControlPanelState extends State<ControlPanel> {
               value: ViewMode.iqData,
               child: Text('IQ Data', style: TextStyle(fontSize: 12)),
             ),
+            DropdownMenuItem(
+              value: ViewMode.tsync,
+              child: Text('tsync', style: TextStyle(fontSize: 12)),
+            ),
           ],
           onChanged: appState.isMeasuring ? null : (value) {
             if (value != null) {
@@ -494,6 +860,40 @@ class _ControlPanelState extends State<ControlPanel> {
           },
         ),
       ),
+    );
+  }
+
+  Widget _buildTsyncLabeledInput(
+    String label,
+    TextEditingController ctrl,
+    void Function(String) onSubmit,
+  ) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 68,
+          child: Text(label, style: const TextStyle(fontSize: 10, color: Colors.black54)),
+        ),
+        Expanded(
+          child: SizedBox(
+            height: 24,
+            child: TextField(
+              controller: ctrl,
+              keyboardType: TextInputType.number,
+              onSubmitted: onSubmit,
+              onEditingComplete: () => onSubmit(ctrl.text),
+              decoration: InputDecoration(
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(4)),
+                filled: true,
+                fillColor: Colors.white,
+              ),
+              style: const TextStyle(fontSize: 11),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -936,7 +1336,7 @@ class _ControlPanelState extends State<ControlPanel> {
     );
   }
 
-  Widget _buildStatusQueryButton(MqttService mqtt) {
+  Widget _buildStatusQueryButton(TransportService mqtt) {
     final isEnabled = mqtt.isConnected && mqtt.isInitialized;
 
     return SizedBox(
@@ -956,7 +1356,7 @@ class _ControlPanelState extends State<ControlPanel> {
     );
   }
 
-  void _requestDeviceStatus(MqttService mqtt) {
+  void _requestDeviceStatus(TransportService mqtt) {
     // Cancel any existing timer and subscription
     _statusTimeoutTimer?.cancel();
     _statusSubscription?.cancel();
@@ -1044,22 +1444,33 @@ class _ControlPanelState extends State<ControlPanel> {
     }
   }
 
-  Widget _buildConnectionStatus(MqttService mqtt) {
+  Widget _buildConnectionStatus(TransportService mqtt) {
     Color statusColor;
     String statusText;
+    String? subText;
+
+    final isTcp = mqtt is TcpServerService;
 
     switch (mqtt.connectionState) {
       case ConnectionState.connected:
         statusColor = Colors.green;
         statusText = 'Connected';
+        if (isTcp && mqtt.brokerIp.isNotEmpty) {
+          subText = mqtt.brokerIp;
+        }
         break;
       case ConnectionState.connecting:
         statusColor = Colors.orange;
-        statusText = 'Connecting...';
+        statusText = isTcp ? 'Listening :${(mqtt as TcpServerService).listenPort}' : 'Connecting...';
         break;
       case ConnectionState.error:
         statusColor = Colors.red;
         statusText = 'Error';
+        if (mqtt.lastError.isNotEmpty) {
+          subText = mqtt.lastError.length > 28
+              ? '${mqtt.lastError.substring(0, 28)}…'
+              : mqtt.lastError;
+        }
         break;
       case ConnectionState.disconnected:
         statusColor = Colors.grey;
@@ -1068,7 +1479,7 @@ class _ControlPanelState extends State<ControlPanel> {
     }
 
     return Container(
-      padding: const EdgeInsets.all(8),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
         color: Colors.grey[200],
         border: Border(top: BorderSide(color: Colors.grey[300]!)),
@@ -1085,12 +1496,26 @@ class _ControlPanelState extends State<ControlPanel> {
             ),
           ),
           const SizedBox(width: 6),
-          Text(
-            statusText,
-            style: TextStyle(
-              fontSize: 11,
-              color: statusColor,
-              fontWeight: FontWeight.w500,
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  statusText,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: statusColor,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                if (subText != null)
+                  Text(
+                    subText,
+                    style: TextStyle(fontSize: 10, color: statusColor.withOpacity(0.8)),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+              ],
             ),
           ),
         ],

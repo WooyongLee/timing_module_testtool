@@ -11,13 +11,58 @@ class Protocol {
   static const int cmdHeader = 0x44;
   static const int respHeader = 0x45;
 
-  // Command Types
+  // Command Types (existing 0x00-0x0F)
   static const int typeInit = 0x00;
   static const int typeSpectrum = 0x01;
   static const int typeIqCapture = 0x02;
   static const int typeStop = 0x0F;
   static const int typeRepeatedSpectrum = 0x04;
   static const int typeStatusQuery = 0x05;
+
+  // T-Sync ACQ command types (0x60-0x6A)
+  static const int acqInit    = 0x60;
+  static const int acqParam   = 0x61;
+  static const int acqRun     = 0x62;
+  static const int acqStatus  = 0x63;
+  static const int acqResult  = 0x64;
+  static const int acqLoop    = 0x65;
+  static const int acqStop    = 0x66;
+  static const int acqSetRf   = 0x67;
+  static const int acqSetPd   = 0x68;
+  static const int acqVersion = 0x69;
+  static const int acqSaveIq  = 0x6A;
+
+  // ACQ lock state values
+  static const int lockUnlock   = 0;
+  static const int lockLocked   = 1;
+  static const int lockHoldover = 3;
+
+  // ACQ error response indicator
+  static const int acqRespError = 0xFF;
+
+  // ACQ state machine values
+  // 1=POWERON, 2=INIT, 3=TRANSIENT, 4=LOCK1, 5=LOCK2,
+  // 6=HOLDOVER, 7=HOLDOVER2, 8=HOLDOVER3
+  static const Map<int, String> acqStateNames = {
+    1: 'POWERON',
+    2: 'INIT',
+    3: 'TRANSIENT',
+    4: 'LOCK1',
+    5: 'LOCK2',
+    6: 'HOLDOVER',
+    7: 'HOLDOVER2',
+    8: 'HOLDOVER3',
+  };
+
+  static const Map<int, String> acqLockNames = {
+    0: 'UNLOCK',
+    1: 'LOCK',
+    3: 'HOLDOVER',
+  };
+
+  // FTP settings for IQ file download
+  static const int ftpPort = 21;
+  static const String ftpRemoteBase = '/run/media/mmcblk0p1/capture_data';
 
   // Status Codes
   static const int statusOk = 0;
@@ -49,7 +94,15 @@ class Protocol {
 
   // Default MQTT Settings
   static const int mqttPort = 1883;
-  static const String defaultIp = '192.168.123.8';
+  static const String defaultIp = '192.168.123.27';
+
+  // TCP Server Settings
+  static const int tcpServerPort = 9000;
+  static const int tcpMagic      = 0xABCD1234; // magic, little-endian on wire
+  static const int tcpTypeCmdReq = 0x10;       // Flutter → device (command)
+  static const int tcpTypeStrResp = 0x01;      // device → Flutter (text)
+  static const int tcpTypeBinData = 0x02;      // device → Flutter (binary)
+  static const int tcpHeaderSize = 12;         // magic(4)+type(1)+pad(3)+length(4)
 
   // Get status message
   static String getStatusMessage(int status) {

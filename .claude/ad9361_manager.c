@@ -24,9 +24,6 @@
 #include <HW/PL/pl_driver.h>
 #include <HW/PL/spi.h>
 
-// 20221201 JBK Add Correlator Setting for LTE =>
-#include "AlgoLTE/AlgoLTE.h"
-// 20221201 JBK Add Correlator Setting for LTE <=
 
 #include "config.h"
 /* Ryan Add, to update gain tables except VSWR (VSWR use its own gain table */
@@ -123,6 +120,176 @@ void get_ad9361_temp(int* temp)
 	sscanf(buf, "%d", temp);
 	*temp /= 1000;
 
+}
+
+int get_ad9361_sampling_frequency(void)
+{
+    char buf[128];
+    int freq = 0;
+    run_shell("cat /sys/bus/iio/devices/iio:device0/in_voltage_sampling_frequency", buf);
+    sscanf(buf, "%d", &freq);
+    return freq;
+}
+
+int get_ad9361_rx1_gain(void)
+{
+    char buf[128];
+    int gain = 0;
+    run_shell("cat /sys/bus/iio/devices/iio:device0/in_voltage0_hardwaregain", buf);
+    sscanf(buf, "%d", &gain);
+    return gain;
+}
+
+int get_ad9361_rx2_gain(void)
+{
+    char buf[128];
+    int gain = 0;
+    run_shell("cat /sys/bus/iio/devices/iio:device0/in_voltage1_hardwaregain", buf);
+    sscanf(buf, "%d", &gain);
+    return gain;
+}
+
+int get_ad9361_tx1_atten(void)
+{
+    char buf[128];
+    float atten = 0;
+    run_shell("cat /sys/bus/iio/devices/iio:device0/out_voltage0_hardwaregain", buf);
+    sscanf(buf, "%f", &atten);
+    return (int)(atten * 1000); // Return in mdB
+}
+
+int get_ad9361_tx2_atten(void)
+{
+    char buf[128];
+    float atten = 0;
+    run_shell("cat /sys/bus/iio/devices/iio:device0/out_voltage1_hardwaregain", buf);
+    sscanf(buf, "%f", &atten);
+    return (int)(atten * 1000); // Return in mdB
+}
+
+uint64_t get_ad9361_rx_lo_freq(void)
+{
+    char buf[128];
+    uint64_t freq = 0;
+    run_shell("cat /sys/bus/iio/devices/iio:device0/out_altvoltage0_RX_LO_frequency", buf);
+    sscanf(buf, "%llu", (unsigned long long *)&freq);
+    return freq;
+}
+
+uint64_t get_ad9361_tx_lo_freq(void)
+{
+    char buf[128];
+    uint64_t freq = 0;
+    run_shell("cat /sys/bus/iio/devices/iio:device0/out_altvoltage1_TX_LO_frequency", buf);
+    sscanf(buf, "%llu", (unsigned long long *)&freq);
+    return freq;
+}
+
+int get_ad9361_rx_rf_bandwidth(void)
+{
+    char buf[128];
+    int bw = 0;
+    run_shell("cat /sys/kernel/debug/iio/iio:device0/adi,rf-rx-bandwidth-hz", buf);
+    sscanf(buf, "%d", &bw);
+    return bw;
+}
+
+int get_ad9361_tx_rf_bandwidth(void)
+{
+    char buf[128];
+    int bw = 0;
+    run_shell("cat /sys/kernel/debug/iio/iio:device0/adi,rf-tx-bandwidth-hz", buf);
+    sscanf(buf, "%d", &bw);
+    return bw;
+}
+
+int get_ad9361_fir_en(void)
+{
+    char buf[128];
+    int en = 0;
+    run_shell("cat /sys/bus/iio/devices/iio:device0/in_out_voltage_filter_fir_en", buf);
+    sscanf(buf, "%d", &en);
+    return en;
+}
+
+int get_ad9361_rx_port_select(char *port, int max_len)
+{
+    char buf[128];
+    run_shell("cat /sys/bus/iio/devices/iio:device0/in_voltage0_rf_port_select", buf);
+    snprintf(port, max_len, "%s", buf);
+    // Remove trailing newline
+    int len = strlen(port);
+    if (len > 0 && port[len-1] == '\n') {
+        port[len-1] = '\0';
+    }
+    return 0;
+}
+
+int get_ad9361_tx_port_select(char *port, int max_len)
+{
+    char buf[128];
+    run_shell("cat /sys/bus/iio/devices/iio:device0/out_voltage0_rf_port_select", buf);
+    snprintf(port, max_len, "%s", buf);
+    // Remove trailing newline
+    int len = strlen(port);
+    if (len > 0 && port[len-1] == '\n') {
+        port[len-1] = '\0';
+    }
+    return 0;
+}
+
+int get_ad9361_1rx_1tx_mode_use_rx_num(void)
+{
+    char buf[128];
+    int val = 0;
+    run_shell("cat /sys/kernel/debug/iio/iio:device0/adi,1rx-1tx-mode-use-rx-num", buf);
+    sscanf(buf, "%d", &val);
+    return val;
+}
+
+int get_ad9361_1rx_1tx_mode_use_tx_num(void)
+{
+    char buf[128];
+    int val = 0;
+    run_shell("cat /sys/kernel/debug/iio/iio:device0/adi,1rx-1tx-mode-use-tx-num", buf);
+    sscanf(buf, "%d", &val);
+    return val;
+}
+
+int get_ad9361_2rx_2tx_mode_enable(void)
+{
+    char buf[128];
+    int val = 0;
+    run_shell("cat /sys/kernel/debug/iio/iio:device0/adi,2rx-2tx-mode-enable", buf);
+    sscanf(buf, "%d", &val);
+    return val;
+}
+
+int get_ad9361_rx_rf_port_input_select(void)
+{
+    char buf[128];
+    int val = 0;
+    run_shell("cat /sys/kernel/debug/iio/iio:device0/adi,rx-rf-port-input-select", buf);
+    sscanf(buf, "%d", &val);
+    return val;
+}
+
+int get_ad9361_tx_lo_powerdown(void)
+{
+    char buf[128];
+    int val = 0;
+    run_shell("cat /sys/bus/iio/devices/iio:device0/out_altvoltage1_TX_LO_powerdown", buf);
+    sscanf(buf, "%d", &val);
+    return val;
+}
+
+int get_ad9361_out_voltage2_raw(void)
+{
+    char buf[128];
+    int val = 0;
+    run_shell("cat /sys/bus/iio/devices/iio:device0/out_voltage2_raw", buf);
+    sscanf(buf, "%d", &val);
+    return val;
 }
 
 static void set_ad9361_rx_freq(uint64_t freq)
@@ -756,16 +923,25 @@ int init_ad9361_module(int meas_type)
         system("echo 0 > " AD9361_DEBUG "/adi,1rx-1tx-mode-use-tx-num");
         system("echo 0 > " AD9361_DEBUG "/adi,rx-rf-port-input-select");
 
+		// Set RF Bandwidth
+		// maximum release analog filter, 56 MHz
+		//system("echo 56000000 > " AD9361_DEBUG "/adi,rf-rx-bandwidth-hz");
+		//system("echo 56000000 > " AD9361_DEBUG "/adi,rf-tx-bandwidth-hz");
+
         system("echo 1 > " AD9361_DEBUG "/initialize");
         usleep(100000);
 
+        // Set Atten 0, Preamp Off
+        set_atten(0);
+        PL_CTRL_Write(SA_LNA_CTRL, 0);
+
         // Apply 61.44MHz FIR filter (SA_50M_Filter.ftr)
-        printf("Applying 61.44MHz Filter: /run/media/mmcblk0p1/ad936x/SA/SA_50M_Filter.ftr\n");
-        system("cat /run/media/mmcblk0p1/ad936x/SA/SA_50M_Filter.ftr > /sys/bus/iio/devices/iio:device0/filter_fir_config");
+        printf("Applying 61.44MHz Filter: /run/media/mmcblk0p1/ad936x/SA/SA_56M_InvFilter1.ftr\n");
+        system("cat /run/media/mmcblk0p1/ad936x/SA/SA_56M_InvFilter1.ftr > /sys/bus/iio/devices/iio:device0/filter_fir_config");
         system("echo 1 > /sys/bus/iio/devices/iio:device0/in_out_voltage_filter_fir_en");
 
         // Set 61.44MHz sampling rate
-        set_ad9361_sampling_rate(61440000);
+        //set_ad9361_sampling_rate(61440000);
         print_sampling_rate();
 
         // RF port configuration
@@ -773,6 +949,7 @@ int init_ad9361_module(int meas_type)
         system("echo A_BALANCED > "AD9361"/in_voltage1_rf_port_select");
 
         // Gain and power settings
+        // init gain setting (saturation gain is over 6 at 0 dBm)
         system("echo 22 > "AD9361"/in_voltage0_hardwaregain");
         system("echo 1 > "AD9361"/out_altvoltage1_TX_LO_powerdown");
         system("echo 1599 > "AD9361"/out_voltage2_raw");
@@ -782,22 +959,20 @@ int init_ad9361_module(int meas_type)
         ll_register_set(0x26, 0x90);  // Manual GPIO mode
         ll_register_set(0x27, 0x00);  // AMP Off
 
-        // set_atten(0);
-
         // FPGA control registers
         PL_CTRL_Write(SA_EN, 1);
         PL_CTRL_Write(SA_LNA_CTRL, 0);
         PL_CTRL_Write(RF_BAND_CTRL, 0xE);
-        PL_CTRL_Write(SA_CAPT_MODE, 1);  // general mode
+        //PL_CTRL_Write(SA_CAPT_MODE, 1);  // general mode
 
         // Counter period for 61.44MHz (10ms = 614400 samples)
         PL_CTRL_Write(COUNTER1_PERIOD, 614400);
         PL_CTRL_Write(ALT_PERIOD, 800000);
 
         // Power measurement settings
-        int pwr_select = 0; // 0 : ADC, 1 : Cal Block
-        PL_CTRL_Write(PWMSR_BLOCK_NUM, (40 | (pwr_select << 8)));
-        PL_CTRL_Write(PWMSR_SAMPLE_NUM, 30720);
+        //int pwr_select = 0; // 0 : ADC, 1 : Cal Block
+        //PL_CTRL_Write(PWMSR_BLOCK_NUM, (40 | (pwr_select << 8)));
+        //PL_CTRL_Write(PWMSR_SAMPLE_NUM, 30720);
 
         // Load gain table
         printf("Loading gain table ad9361_std_gaintable_default.txt\n");
@@ -849,15 +1024,14 @@ int init_ad9361_module(int meas_type)
         // sa_capt_mode     0 : sweep , 1 : general
         PL_CTRL_Write(SA_CAPT_MODE, 1);
 
-        // 20240130 JBK Add Correlator Setting for LTE =>
+        // LTE Correlator Setting (AlgoLTE removed)
         PL_CTRL_Write(COUNTER1_PERIOD, 307200);
         PL_CTRL_Write(ALT_PERIOD, 400000);
-        lte_corr_blk_cntrl();
+        // lte_corr_blk_cntrl() removed - AlgoLTE module removed
 
         int pwr_select = 0; // 0 : ADC, 1 : Cal Block
         PL_CTRL_Write(PWMSR_BLOCK_NUM, (20 | (pwr_select << 8)));
         PL_CTRL_Write(PWMSR_SAMPLE_NUM, 15360);
-        // 20240130 JBK Add Correlator Setting for LTE <=
 
         /* Ryan Add, to update gain tables except VSWR (VSWR use its own gain table */
         printf("Loading gain table ad9361_std_gaintable_default.txt\n");

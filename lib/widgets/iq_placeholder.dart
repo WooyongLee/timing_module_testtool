@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/mqtt_service.dart';
+import '../services/transport_manager.dart';
 import '../services/app_state.dart';
 
 /// Placeholder widget for IQ view (will be replaced in Phase 3)
@@ -9,8 +10,9 @@ class IqPlaceholder extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer2<MqttService, AppState>(
-      builder: (context, mqtt, appState, child) {
+    return Consumer2<TransportManager, AppState>(
+      builder: (context, manager, appState, child) {
+        final mqtt = manager.active;
         return Container(
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(

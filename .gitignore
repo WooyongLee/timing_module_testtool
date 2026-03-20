@@ -49,3 +49,4 @@ app.*.map.json
 /.claude/tm_test_tool_1.txt
 /.claude/tm_test_tool_2.txt
 /.claude/Vertical_Legend.jpg
+/csv_data/iq_3550080kHz_30720samples_2026-03-11T18-47-59.csv

@@ -9,7 +9,9 @@
       "Bash(/bin/bash -c \"flutter analyze\")",
       "Bash(echo:*)",
       "Bash(/mnt/d/project_temp/flutter/flutter/bin/dart analyze:*)",
-      "Bash(/mnt/d/project_temp/flutter/flutter/bin/cache/dart-sdk/bin/dart analyze /mnt/d/project_temp/flutter/timing_module_testtool/lib/)"
+      "Bash(/mnt/d/project_temp/flutter/flutter/bin/cache/dart-sdk/bin/dart analyze /mnt/d/project_temp/flutter/timing_module_testtool/lib/)",
+      "Bash(which flutter:*)",
+      "Bash(bash -c \"/mnt/d/project_temp/flutter/flutter/bin/dart analyze lib/ 2>&1\" | head -80)"
     ]
   }
 }

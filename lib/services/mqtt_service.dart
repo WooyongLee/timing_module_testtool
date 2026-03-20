@@ -4,33 +4,21 @@ import 'package:flutter/foundation.dart';
 import 'package:mqtt_client/mqtt_client.dart' hide Protocol;
 import 'package:mqtt_client/mqtt_server_client.dart';
 import '../constants/protocol.dart';
+import '../models/tsync_data.dart';
+import 'transport_service.dart';
 
-enum ConnectionState { disconnected, connecting, connected, error }
-
-/// MQTT log entry for display
-class MqttLogEntry {
-  final DateTime timestamp;
-  final String direction; // 'TX' or 'RX'
-  final String topic;
-  final String message;
-  final bool isBinary;
-
-  MqttLogEntry({
-    required this.direction,
-    required this.topic,
-    required this.message,
-    this.isBinary = false,
-  }) : timestamp = DateTime.now();
-
-  String get formattedTime =>
-      '${timestamp.hour.toString().padLeft(2, '0')}:'
-      '${timestamp.minute.toString().padLeft(2, '0')}:'
-      '${timestamp.second.toString().padLeft(2, '0')}.'
-      '${timestamp.millisecond.toString().padLeft(3, '0')}';
-}
+// Re-export shared types so existing `import 'mqtt_service.dart'` still works.
+export 'transport_service.dart'
+    show
+        ConnectionState,
+        MqttLogEntry,
+        MqttResponse,
+        TsyncAck,
+        RegisterResponse,
+        TransportService;
 
 /// MQTT Service for communication with Combo FW
-class MqttService extends ChangeNotifier {
+class MqttService extends TransportService {
   MqttServerClient? _client;
   ConnectionState _connectionState = ConnectionState.disconnected;
   String _lastError = '';
@@ -44,6 +32,12 @@ class MqttService extends ChangeNotifier {
   final _logController = StreamController<MqttLogEntry>.broadcast();
   final _statusController = StreamController<String>.broadcast();
   final _registerResponseController = StreamController<RegisterResponse>.broadcast();
+
+  // T-Sync ACQ stream controllers
+  final _tsyncIterController      = StreamController<TsyncIterResult>.broadcast();
+  final _tsyncStatusController    = StreamController<TsyncStatus>.broadcast();
+  final _tsyncAcqResultController = StreamController<TsyncAcqResult>.broadcast();
+  final _tsyncAckController       = StreamController<TsyncAck>.broadcast();
 
   int _pendingDataSize = 0;
 
@@ -68,6 +62,12 @@ class MqttService extends ChangeNotifier {
   Stream<MqttLogEntry> get logStream => _logController.stream;
   Stream<String> get statusStream => _statusController.stream;
   Stream<RegisterResponse> get registerResponseStream => _registerResponseController.stream;
+
+  // T-Sync ACQ streams
+  Stream<TsyncIterResult> get tsyncIterStream      => _tsyncIterController.stream;
+  Stream<TsyncStatus>     get tsyncStatusStream    => _tsyncStatusController.stream;
+  Stream<TsyncAcqResult>  get tsyncAcqResultStream => _tsyncAcqResultController.stream;
+  Stream<TsyncAck>        get tsyncAckStream       => _tsyncAckController.stream;
 
   void _addLog(MqttLogEntry entry) {
     _logHistory.add(entry);
@@ -183,6 +183,7 @@ class MqttService extends ChangeNotifier {
 
   /// Request FFT spectrum measurement (single shot)
   /// Protocol: 0x44 0x01 <freq_hz> <rbw_hz> <fft_size>
+  @override
   void sendSpectrumCommand({
     required int freqHz,
     required int rbwHz,
@@ -277,6 +278,15 @@ class MqttService extends ChangeNotifier {
     try {
       final header = int.parse(parts[0]);
 
+      // T-Sync ACQ responses: 0x45 <acq_cmd_type> ...
+      if (header == Protocol.respHeader && parts.length >= 2) {
+        final typeVal = int.parse(parts[1]);
+        if (typeVal >= Protocol.acqInit && typeVal <= Protocol.acqSaveIq) {
+          _handleTsyncResponse(typeVal, parts);
+          return;
+        }
+      }
+
       // Support multiple response formats:
       // Format 1: "0x44 0xXX OK" or "0x44 0xXX FAIL"
       // Format 2: "0x45 <type> <status>" (e.g., "0x45 0 1")
@@ -351,6 +361,89 @@ class MqttService extends ChangeNotifier {
     }
   }
 
+  // ── T-Sync ACQ response handler ──────────────────────────────────────────
+
+  void _handleTsyncResponse(int typeVal, List<String> parts) {
+    // Error response: 0x45 <cmd> 0xFF
+    if (parts.length >= 3 && int.tryParse(parts[2]) == Protocol.acqRespError) {
+      debugPrint('ACQ error response for cmd=0x${typeVal.toRadixString(16)}');
+      _tsyncAckController.add(TsyncAck(cmd: typeVal, isOk: false));
+      return;
+    }
+
+    switch (typeVal) {
+      case Protocol.acqRun:
+      case Protocol.acqLoop:
+        // per-iteration result
+        final result = TsyncIterResult.fromTokens(parts);
+        if (result != null) _tsyncIterController.add(result);
+
+      case Protocol.acqStatus:
+        final status = TsyncStatus.fromTokens(parts);
+        if (status != null) _tsyncStatusController.add(status);
+
+      case Protocol.acqResult:
+        final result = TsyncAcqResult.fromTokens(parts);
+        if (result != null) _tsyncAcqResultController.add(result);
+
+      default:
+        // ACK responses for acqInit/acqParam/acqStop/acqSetRf/acqSetPd/acqVersion/acqSaveIq
+        final isOk = parts.length >= 3 && int.tryParse(parts[2]) != Protocol.acqRespError;
+        _tsyncAckController.add(TsyncAck(cmd: typeVal, isOk: isOk, params: parts));
+    }
+  }
+
+  // ── T-Sync ACQ send methods ───────────────────────────────────────────────
+
+  /// 0x44 0x69 — version query
+  void sendAcqVersion() => sendCommand('0x44 0x69');
+
+  /// 0x44 0x60 — initialize ACQ
+  void sendAcqInit() => sendCommand('0x44 0x60');
+
+  /// 0x44 0x61 <mode> <samples> <ho_time> <dac> — set parameters
+  void sendAcqParam({
+    required int mode,
+    required int samples,
+    required int hoTime,
+    required int dac,
+  }) => sendCommand('0x44 0x61 $mode $samples $hoTime $dac');
+
+  /// 0x44 0x62 <iterations> — run N iterations
+  void sendAcqRun(int iterations) => sendCommand('0x44 0x62 $iterations');
+
+  /// 0x44 0x65 <count> <delay_ms> — loop (0=infinite)
+  void sendAcqLoop({required int count, required int delayMs}) =>
+      sendCommand('0x44 0x65 $count $delayMs');
+
+  /// 0x44 0x66 — stop loop
+  void sendAcqStop() => sendCommand('0x44 0x66');
+
+  /// 0x44 0x63 — query status
+  void sendAcqStatus() => sendCommand('0x44 0x63');
+
+  /// 0x44 0x64 — query detailed result
+  void sendAcqResult() => sendCommand('0x44 0x64');
+
+  /// 0x44 0x67 <ssb_off> <pd_off> <atten> — RF offset settings
+  void sendAcqSetRf({
+    required int ssbOff,
+    required int pdOff,
+    required int atten,
+  }) => sendCommand('0x44 0x67 $ssbOff $pdOff $atten');
+
+  /// 0x44 0x68 <thres_max> <thres_min> <beam> — PD threshold settings
+  void sendAcqSetPd({
+    required int thresMax,
+    required int thresMin,
+    required int beam,
+  }) => sendCommand('0x44 0x68 $thresMax $thresMin $beam');
+
+  /// 0x44 0x6A <enable> — saveiq (0=off, 1=on, 2=query)
+  void sendAcqSaveIq(int enable) => sendCommand('0x44 0x6A $enable');
+
+  // ─────────────────────────────────────────────────────────────────────────
+
   void _processResponse(int type, bool isOk, {int? currentIter, int? totalCount}) {
     if (type == Protocol.typeInit) {
       if (isOk) {
@@ -417,39 +510,11 @@ class MqttService extends ChangeNotifier {
     _logController.close();
     _statusController.close();
     _registerResponseController.close();
+    _tsyncIterController.close();
+    _tsyncStatusController.close();
+    _tsyncAcqResultController.close();
+    _tsyncAckController.close();
     super.dispose();
   }
 }
 
-/// MQTT Response data
-class MqttResponse {
-  final int type;
-  final int status;
-  final bool isSuccess;
-  final int? currentIteration;
-  final int? totalCount;
-
-  MqttResponse({
-    required this.type,
-    required this.status,
-    required this.isSuccess,
-    this.currentIteration,
-    this.totalCount,
-  });
-
-  bool get isOk => isSuccess;
-  String get statusMessage => isSuccess ? 'OK' : 'FAIL';
-}
-
-/// Register response for sub-commands 0x10-0x4F
-class RegisterResponse {
-  final int subCommand;
-  final List<String> params;
-  final String rawResponse;
-
-  RegisterResponse({
-    required this.subCommand,
-    required this.params,
-    required this.rawResponse,
-  });
-}

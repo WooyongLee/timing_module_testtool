@@ -5,10 +5,10 @@
  * For Timing Module Phase 1 verification
  *
  * Protocol Format:
- *   0x44 0x00                           - Initialize 61.44MHz mode
- *   0x44 0x01 <center_freq_khz> <rbw_idx> <maxhold> - Spectrum measurement
- *   0x44 0x02 <center_freq_khz> <sample_count>      - IQ data capture
- *   0x44 0x0F                           - Stop measurement
+ *   0x44 0x00                                       - Initialize 61.44MHz mode
+ *   0x44 0x01 <freq_hz> <rbw_hz> <fft_size>        - Spectrum/FFT measurement
+ *   0x44 0x02 <freq_hz> <rbw_hz> <iq_byte_size>    - IQ data capture
+ *   0x44 0x0F                                       - Stop measurement
  *
  * Response Format:
  *   0x45 <type> <status> [data...]
@@ -40,10 +40,10 @@
 /* Command structure for 61.44MHz test */
 typedef struct {
     uint32_t type;              /* Measurement type (0x00, 0x01, 0x02, 0x0F) */
-    uint64_t center_freq_khz;   /* Center frequency in kHz */
-    uint32_t rbw_idx;           /* RBW index (0-3) */
-    uint32_t maxhold;           /* Max hold mode (0=off, 1=on) */
-    uint32_t sample_count;      /* IQ sample count */
+    uint64_t center_freq_hz;    /* Center frequency in Hz */
+    uint32_t rbw_hz;            /* RBW in Hz (15000, 30000, 60000, 120000) */
+    uint32_t fft_size;          /* FFT size for spectrum measurement */
+    uint32_t iq_byte_size;      /* IQ capture byte size */
 } Test6144_Cmd;
 
 /* State structure */
@@ -70,20 +70,21 @@ void test_6144_deinit(void);
 
 /**
  * Start spectrum measurement
- * @param center_freq_khz Center frequency in kHz (60000 - 6000000)
- * @param rbw_idx RBW index (0=15kHz, 1=30kHz, 2=60kHz, 3=120kHz)
- * @param maxhold Max hold mode (0=off, 1=on)
+ * @param center_freq_hz Center frequency in Hz (60000000 - 6000000000)
+ * @param rbw_hz RBW in Hz (15000, 30000, 60000, 120000)
+ * @param fft_size FFT size (number of points)
  * @return 0 on success, negative on error
  */
-int test_6144_spectrum_start(uint64_t center_freq_khz, uint32_t rbw_idx, uint32_t maxhold);
+int test_6144_spectrum_start(uint64_t center_freq_hz, uint32_t rbw_hz, uint32_t fft_size);
 
 /**
  * Start IQ data capture
- * @param center_freq_khz Center frequency in kHz
- * @param sample_count Number of IQ samples to capture
+ * @param center_freq_hz Center frequency in Hz
+ * @param rbw_hz RBW in Hz (15000, 30000, 60000, 120000)
+ * @param iq_byte_size Total bytes to capture (I/Q pairs * 4 bytes)
  * @return 0 on success, negative on error
  */
-int test_6144_iq_capture_start(uint64_t center_freq_khz, uint32_t sample_count);
+int test_6144_iq_capture_start(uint64_t center_freq_hz, uint32_t rbw_hz, uint32_t iq_byte_size);
 
 /**
  * Stop current measurement

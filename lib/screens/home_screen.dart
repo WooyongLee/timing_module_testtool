@@ -4,6 +4,7 @@ import '../services/app_state.dart';
 import '../widgets/control_panel.dart';
 import '../widgets/spectrum_view.dart';
 import '../widgets/iq_view.dart';
+import '../widgets/tsync_view.dart';
 import '../widgets/mqtt_log_panel.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -58,9 +59,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 Expanded(
                   child: Consumer<AppState>(
                     builder: (context, appState, child) {
-                      return appState.viewMode == ViewMode.spectrum
-                          ? const SpectrumView()
-                          : const IqView();
+                      return switch (appState.viewMode) {
+                        ViewMode.spectrum => const SpectrumView(),
+                        ViewMode.iqData => const IqView(),
+                        ViewMode.tsync => const TsyncView(),
+                      };
                     },
                   ),
                 ),

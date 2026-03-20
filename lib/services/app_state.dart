@@ -1,11 +1,18 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import '../constants/protocol.dart';
 import '../models/spectrum_data.dart';
 import '../models/iq_data.dart';
+import '../models/tsync_data.dart';
 import 'mqtt_service.dart';
+import 'transport_service.dart';
+import 'transport_manager.dart';
+import 'ftp_service.dart';
 
 /// Feature flag: Use legacy repeat FFT (firmware-based) vs new repeat FFT (timer-based)
 /// - true: Use legacy 0x44 0x04 command (firmware handles repetition)
@@ -13,21 +20,44 @@ import 'mqtt_service.dart';
 const bool USE_LEGACY_REPEAT_FFT = false;
 
 /// View mode enum
-enum ViewMode { spectrum, iqData }
+enum ViewMode { spectrum, iqData, tsync }
 
 /// Application state management
 class AppState extends ChangeNotifier {
-  final MqttService mqttService;
+  final TransportManager _transportManager;
+
+  /// Convenience getter — routes through the currently active transport.
+  TransportService get mqttService => _transportManager.active;
 
   // View mode
   ViewMode _viewMode = ViewMode.spectrum;
 
   // Measurement settings
-  double _centerFreqMhz = 3000; // MHz (displayed as MHz, converted to Hz for protocol)
+  double _centerFreqMhz = 3550.08;// 3000; // MHz (displayed as MHz, converted to Hz for protocol)
   int _rbwIndex = Protocol.defaultRbwIndex;
   bool _maxHold = false;
   int _iqByteSize = 16384; // IQ capture byte size (4 bytes per I/Q pair)
   bool _markerEnabled = true;
+  bool _tsyncSaveCsv = true;
+
+  // ── T-Sync ACQ parameters ─────────────────────────────────────────────────
+  int _tsyncMode       = 0;       // ACQ_PARAM mode
+  int _tsyncSamples    = 2600000; // ACQ_PARAM samples
+  int _tsyncHoTime     = 30;      // ACQ_PARAM ho_time (sec)
+  int _tsyncDac        = 32768;   // ACQ_PARAM dac (0~65535)
+  int _tsyncRunNumber  = 1;       // ACQ_RUN: number of runs
+  int _tsyncLoopCount  = 0;       // ACQ_LOOP: count (0 = infinite)
+  int _tsyncDelayMs    = 500;     // ACQ_LOOP delay_ms
+
+  // T-Sync ACQ runtime state
+  bool _tsyncInitialized = false;
+  bool _tsyncRunning     = false; // ACQ_RUN in progress
+  bool _tsyncLooping     = false; // ACQ_LOOP in progress
+  TsyncStatus?    _tsyncStatus;
+  TsyncAcqResult? _tsyncLastResult;
+  final List<TsyncIterResult> _tsyncResults = [];
+  final Map<int, TsyncFtpStatus> _tsyncFtpStatus = {};
+  // ─────────────────────────────────────────────────────────────────────────
 
   // Measurement state
   bool _isMeasuring = false;
@@ -49,6 +79,9 @@ class AppState extends ChangeNotifier {
   StreamSubscription? _responseSubscription;
   StreamSubscription? _spectrumSubscription;
   StreamSubscription? _iqSubscription;
+  StreamSubscription? _tsyncIterSubscription;
+  StreamSubscription? _tsyncStatusSubscription;
+  StreamSubscription? _tsyncAcqResultSubscription;
 
   // Queue for throttling spectrum updates during repeated measurements
   final Queue<Uint8List> _spectrumDataQueue = Queue<Uint8List>();
@@ -59,7 +92,9 @@ class AppState extends ChangeNotifier {
   Timer? _repeatTimer;
   int _remainingRepeatCount = 0;
 
-  AppState({required this.mqttService}) {
+  AppState({required TransportManager transportManager})
+      : _transportManager = transportManager {
+    _transportManager.addListener(_onTransportChanged);
     _setupSubscriptions();
   }
 
@@ -72,6 +107,24 @@ class AppState extends ChangeNotifier {
   bool get maxHold => _maxHold;
   int get iqByteSize => _iqByteSize;
   bool get markerEnabled => _markerEnabled;
+  bool get tsyncSaveCsv => _tsyncSaveCsv;
+
+  // T-Sync getters
+  int  get tsyncMode        => _tsyncMode;
+  int  get tsyncSamples     => _tsyncSamples;
+  int  get tsyncHoTime      => _tsyncHoTime;
+  int  get tsyncDac         => _tsyncDac;
+  int  get tsyncRunNumber   => _tsyncRunNumber;
+  int  get tsyncLoopCount   => _tsyncLoopCount;
+  int  get tsyncDelayMs     => _tsyncDelayMs;
+  bool get tsyncInitialized => _tsyncInitialized;
+  bool get tsyncRunning     => _tsyncRunning;
+  bool get tsyncLooping     => _tsyncLooping;
+  TsyncStatus?    get tsyncStatus     => _tsyncStatus;
+  TsyncAcqResult? get tsyncLastResult => _tsyncLastResult;
+  List<TsyncIterResult>         get tsyncResults   => List.unmodifiable(_tsyncResults);
+  Map<int, TsyncFtpStatus>      get tsyncFtpStatus => Map.unmodifiable(_tsyncFtpStatus);
+
   bool get isMeasuring => _isMeasuring;
   int get fftLength => _fftLength;
   int get repeatCount => _repeatCount;
@@ -110,6 +163,19 @@ class AppState extends ChangeNotifier {
     }
     notifyListeners();
   }
+
+  set tsyncSaveCsv(bool value) {
+    _tsyncSaveCsv = value;
+    notifyListeners();
+  }
+
+  set tsyncMode(int v)      { _tsyncMode = v;      notifyListeners(); }
+  set tsyncSamples(int v)   { _tsyncSamples = v;   notifyListeners(); }
+  set tsyncHoTime(int v)    { _tsyncHoTime = v;    notifyListeners(); }
+  set tsyncDac(int v)       { _tsyncDac = v;       notifyListeners(); }
+  set tsyncRunNumber(int v) { _tsyncRunNumber = v; notifyListeners(); }
+  set tsyncLoopCount(int v) { _tsyncLoopCount = v; notifyListeners(); }
+  set tsyncDelayMs(int v)   { _tsyncDelayMs = v;   notifyListeners(); }
 
   set iqByteSize(int value) {
     if (value >= 4 && value <= Protocol.maxIqSamples * 4) {
@@ -151,10 +217,37 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  void _cancelSubscriptions() {
+    _responseSubscription?.cancel();
+    _spectrumSubscription?.cancel();
+    _iqSubscription?.cancel();
+    _tsyncIterSubscription?.cancel();
+    _tsyncStatusSubscription?.cancel();
+    _tsyncAcqResultSubscription?.cancel();
+    _responseSubscription = null;
+    _spectrumSubscription = null;
+    _iqSubscription = null;
+    _tsyncIterSubscription = null;
+    _tsyncStatusSubscription = null;
+    _tsyncAcqResultSubscription = null;
+  }
+
+  /// Re-subscribe when the active transport changes.
+  void _onTransportChanged() {
+    _cancelSubscriptions();
+    _setupSubscriptions();
+    // Reset measurement state when switching transports.
+    _isMeasuring = false;
+    notifyListeners();
+  }
+
   void _setupSubscriptions() {
     _responseSubscription = mqttService.responseStream.listen(_handleResponse);
     _spectrumSubscription = mqttService.spectrumDataStream.listen(_queueSpectrumData);
     _iqSubscription = mqttService.iqDataStream.listen(_handleIqData);
+    _tsyncIterSubscription = mqttService.tsyncIterStream.listen(_handleTsyncIter);
+    _tsyncStatusSubscription = mqttService.tsyncStatusStream.listen(_handleTsyncStatus);
+    _tsyncAcqResultSubscription = mqttService.tsyncAcqResultStream.listen(_handleTsyncAcqResult);
   }
 
   void _startUpdateTimer() {
@@ -437,6 +530,171 @@ class AppState extends ChangeNotifier {
     );
   }
 
+  // ── T-Sync ACQ handlers ───────────────────────────────────────────────────
+
+  void _handleTsyncIter(TsyncIterResult result) {
+    _tsyncResults.add(result);
+    // Keep last 500 rows
+    if (_tsyncResults.length > 500) _tsyncResults.removeAt(0);
+
+    // Detect file_saved and trigger FTP download
+    if (result.fileSaved == 1) {
+      final counter = result.fileCounter;
+      if (!_tsyncFtpStatus.containsKey(counter)) {
+        _tsyncFtpStatus[counter] = TsyncFtpStatus(fileCounter: counter);
+        _triggerFtpDownload(counter);
+      }
+    }
+
+    // ACQ_RUN: if all iterations done, mark not running
+    if (_tsyncRunning && result.total > 0 && result.iter >= result.total) {
+      _tsyncRunning = false;
+    }
+
+    notifyListeners();
+  }
+
+  void _handleTsyncStatus(TsyncStatus status) {
+    _tsyncStatus = status;
+    notifyListeners();
+  }
+
+  void _handleTsyncAcqResult(TsyncAcqResult result) {
+    _tsyncLastResult = result;
+    notifyListeners();
+  }
+
+  void _triggerFtpDownload(int fileCounter) async {
+    final ftpSvc = FtpService(host: mqttService.brokerIp);
+    try {
+      final result = await ftpSvc.downloadIqFiles(fileCounter);
+
+      final status = _tsyncFtpStatus[fileCounter]!;
+      status.iDownloaded = true;
+      status.qDownloaded = true;
+
+      if (_tsyncSaveCsv) {
+        final dir = await getApplicationDocumentsDirectory();
+        final counterStr = fileCounter.toString().padLeft(4, '0');
+        final csvPath = '${dir.path}/tsync_IQ_$counterStr.csv';
+        await saveIqCsv(
+          filePath: csvPath,
+          fileCounter: fileCounter,
+          iData: result.iData,
+          qData: result.qData,
+        );
+        status.csvSaved = true;
+        debugPrint('[tsync] CSV saved: $csvPath');
+      }
+
+      notifyListeners();
+    } catch (e) {
+      debugPrint('[tsync] FTP download failed for #$fileCounter: $e');
+    }
+  }
+
+  // ── T-Sync ACQ actions ────────────────────────────────────────────────────
+
+  /// Send ACQ_INIT
+  void tsyncInit() {
+    mqttService.sendAcqInit();
+    _tsyncInitialized = true;
+    notifyListeners();
+  }
+
+  /// Send ACQ_PARAM with current parameter values
+  void tsyncApplyParam() {
+    mqttService.sendAcqParam(
+      mode:    _tsyncMode,
+      samples: _tsyncSamples,
+      hoTime:  _tsyncHoTime,
+      dac:     _tsyncDac,
+    );
+  }
+
+  /// Send ACQ_RUN (0x44 0x62 <runNumber>)
+  void tsyncRun() {
+    if (!mqttService.isConnected) return;
+    _tsyncRunning = true;
+    notifyListeners();
+    mqttService.sendAcqRun(_tsyncRunNumber);
+  }
+
+  /// Send ACQ_LOOP (0x44 0x65 <loopCount> <delayMs>)
+  void tsyncLoop() {
+    if (!mqttService.isConnected) return;
+    _tsyncLooping = true;
+    notifyListeners();
+    mqttService.sendAcqLoop(count: _tsyncLoopCount, delayMs: _tsyncDelayMs);
+  }
+
+  /// Send ACQ_STOP (0x44 0x66) — stops loop
+  void tsyncStop() {
+    mqttService.sendAcqStop();
+    _tsyncLooping = false;
+    notifyListeners();
+  }
+
+  /// Send ACQ_STATUS query
+  void tsyncQueryStatus() => mqttService.sendAcqStatus();
+
+  /// Export current tsync result table to CSV.
+  /// Saves to <executable_dir>/csv/tsync_YYYYMMDDHHMMSS.csv
+  /// Returns the saved file path, or null on error.
+  Future<String?> tsyncExportCsv() async {
+    if (_tsyncResults.isEmpty) return null;
+    try {
+      final exeDir = p.dirname(Platform.resolvedExecutable);
+      final csvDir = Directory(p.join(exeDir, 'csv'));
+      if (!csvDir.existsSync()) csvDir.createSync(recursive: true);
+
+      final now = DateTime.now();
+      final timestamp =
+          '${now.year.toString().padLeft(4, '0')}'
+          '${now.month.toString().padLeft(2, '0')}'
+          '${now.day.toString().padLeft(2, '0')}'
+          '${now.hour.toString().padLeft(2, '0')}'
+          '${now.minute.toString().padLeft(2, '0')}'
+          '${now.second.toString().padLeft(2, '0')}';
+
+      final filePath = p.join(csvDir.path, 'tsync_$timestamp.csv');
+
+      final sb = StringBuffer();
+      sb.writeln('Timestamp,Iter,State,Lock,SSB Lock,PCI,Beam,CRC,Corr,DAC');
+      for (final r in _tsyncResults) {
+        final ts = r.timestamp;
+        final tsStr =
+            '${ts.year.toString().padLeft(4, '0')}-'
+            '${ts.month.toString().padLeft(2, '0')}-'
+            '${ts.day.toString().padLeft(2, '0')} '
+            '${ts.hour.toString().padLeft(2, '0')}:'
+            '${ts.minute.toString().padLeft(2, '0')}:'
+            '${ts.second.toString().padLeft(2, '0')}.'
+            '${ts.millisecond.toString().padLeft(3, '0')}';
+        sb.writeln(
+          '"$tsStr",${r.iter},${r.stateName},${r.lockName},${r.ssbLockName},'
+          '${r.pci},${r.beam},${r.crcOk ? 'OK' : 'FAIL'},${r.corr},${r.curDac}',
+        );
+      }
+
+      await File(filePath).writeAsString(sb.toString());
+      debugPrint('[tsync] CSV exported: $filePath');
+      return filePath;
+    } catch (e) {
+      debugPrint('[tsync] CSV export failed: $e');
+      return null;
+    }
+  }
+
+  /// Clear result history
+  void tsyncClearResults() {
+    _tsyncResults.clear();
+    _tsyncFtpStatus.clear();
+    notifyListeners();
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+
   /// Clear max hold data
   void clearMaxHold() {
     _maxHoldData = null;
@@ -445,9 +703,8 @@ class AppState extends ChangeNotifier {
 
   @override
   void dispose() {
-    _responseSubscription?.cancel();
-    _spectrumSubscription?.cancel();
-    _iqSubscription?.cancel();
+    _transportManager.removeListener(_onTransportChanged);
+    _cancelSubscriptions();
     _stopUpdateTimer();
     _stopRepeatTimer();
     _spectrumDataQueue.clear();

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'services/mqtt_service.dart';
+import 'services/tcp_server_service.dart';
+import 'services/transport_manager.dart';
 import 'services/app_state.dart';
 import 'screens/home_screen.dart';
 
@@ -16,12 +18,21 @@ class MyApp extends StatelessWidget {
     return MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => MqttService()),
-        ChangeNotifierProxyProvider<MqttService, AppState>(
-          create: (context) => AppState(
-            mqttService: context.read<MqttService>(),
+        ChangeNotifierProvider(create: (_) => TcpServerService()),
+        ChangeNotifierProxyProvider2<MqttService, TcpServerService, TransportManager>(
+          create: (ctx) => TransportManager(
+            mqttService: ctx.read<MqttService>(),
+            tcpServerService: ctx.read<TcpServerService>(),
           ),
-          update: (context, mqtt, previous) =>
-              previous ?? AppState(mqttService: mqtt),
+          update: (ctx, mqtt, tcp, prev) =>
+              prev ?? TransportManager(mqttService: mqtt, tcpServerService: tcp),
+        ),
+        ChangeNotifierProxyProvider<TransportManager, AppState>(
+          create: (ctx) => AppState(
+            transportManager: ctx.read<TransportManager>(),
+          ),
+          update: (ctx, manager, prev) =>
+              prev ?? AppState(transportManager: manager),
         ),
       ],
       child: MaterialApp(

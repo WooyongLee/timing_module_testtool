@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/mqtt_service.dart';
+import '../services/transport_manager.dart';
 
 class MqttLogPanel extends StatefulWidget {
   final double height;
@@ -23,8 +24,9 @@ class _MqttLogPanelState extends State<MqttLogPanel> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<MqttService>(
-      builder: (context, mqtt, child) {
+    return Consumer<TransportManager>(
+      builder: (context, manager, child) {
+        final mqtt = manager.active;
         // Auto scroll to bottom when new logs arrive
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (_autoScroll && _scrollController.hasClients) {

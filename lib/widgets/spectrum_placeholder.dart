@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/mqtt_service.dart';
+import '../services/transport_service.dart';
+import '../services/transport_manager.dart';
 import '../services/app_state.dart';
 import '../constants/protocol.dart';
 
@@ -10,8 +12,9 @@ class SpectrumPlaceholder extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer2<MqttService, AppState>(
-      builder: (context, mqtt, appState, child) {
+    return Consumer2<TransportManager, AppState>(
+      builder: (context, manager, appState, child) {
+        final mqtt = manager.active;
         return Container(
           padding: const EdgeInsets.all(16),
           child: Column(
@@ -78,7 +81,7 @@ class SpectrumPlaceholder extends StatelessWidget {
     );
   }
 
-  Widget _buildControls(BuildContext context, MqttService mqtt, AppState appState) {
+  Widget _buildControls(BuildContext context, TransportService mqtt, AppState appState) {
     return Wrap(
       spacing: 16,
       runSpacing: 8,

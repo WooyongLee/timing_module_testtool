@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/mqtt_service.dart';
+import '../services/transport_service.dart';
 
-void showRegisterWindow(BuildContext context, MqttService mqtt) {
+void showRegisterWindow(BuildContext context, TransportService mqtt) {
   showDialog(
     context: context,
     barrierDismissible: true,
@@ -11,7 +12,7 @@ void showRegisterWindow(BuildContext context, MqttService mqtt) {
 }
 
 class RegisterWindow extends StatefulWidget {
-  final MqttService mqtt;
+  final TransportService mqtt;
   const RegisterWindow({super.key, required this.mqtt});
 
   @override
