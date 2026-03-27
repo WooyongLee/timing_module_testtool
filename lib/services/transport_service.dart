@@ -141,4 +141,36 @@ abstract class TransportService extends ChangeNotifier {
   void sendAcqSetRf({required int ssbOff, required int pdOff, required int atten});
   void sendAcqSetPd({required int thresMax, required int thresMin, required int beam});
   void sendAcqSaveIq(int enable);
+  void sendAcqRunOne(); // 0x6B — single one-shot run; result arrives via tsyncAckStream
+
+  /// RF band path control (0x44 0x08 <path>).
+  /// Response arrives via [registerResponseStream] as subCommand=0x08, params[0]=path_value.
+  void sendRfBandCtrl(int path);
+
+  // ── PL commands (0x70-0x75) ───────────────────────────────────────────────
+  // All responses arrive via [registerResponseStream]; params[0] holds the return value.
+
+  /// 0x70 pllinit — RF_PWR ON + ADF4001 4-latch init + lock poll.
+  /// params[0]: "1" (success) / "0" (fail)
+  void sendPlInit();
+
+  /// 0x71 pllset <data> — write single 24-bit latch.
+  /// params[0]: "0"
+  void sendPllSet(int data);
+
+  /// 0x72 plstatus — dump PL register status.
+  /// params[0]: "0"
+  void sendPlStatus();
+
+  /// 0x73 plllocked — read ZYNQ_CLK_LOCKED.
+  /// params[0]: "1" (locked) / "0" (unlocked)
+  void sendPllLocked();
+
+  /// 0x74 fpgatemp — read TMP102 temperature (blocking).
+  /// params[0]: temperature in milli-degC, or timeout string
+  void sendFpgaTemp();
+
+  /// 0x75 rfpwr <0|1> — set RF_PWR.
+  /// params[0]: current RF_PWR state after setting
+  void sendRfPwr(int enable);
 }

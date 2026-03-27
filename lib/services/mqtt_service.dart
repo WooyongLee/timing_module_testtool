@@ -266,7 +266,7 @@ class MqttService extends TransportService {
 
     final parts = responseStr.trim().split(' ');
     if (parts.length < 2) return;
-    if (parts.contains("0x51") || responseStr.contains("0x06 0x02") || responseStr.contains("0x06 0x01")) return;
+    if (parts.contains("0x51") || responseStr.contains("0x06 0x02") || responseStr.contains("0x06 0x01") || responseStr.contains("0x06 0x00")) return;
 
     debugPrint('MQTT RX: $responseStr');
     _addLog(MqttLogEntry(
@@ -298,8 +298,8 @@ class MqttService extends TransportService {
         final statusStr = parts[2].toUpperCase();
         final isOk = statusStr == 'OK';
 
-        // Broadcast register responses (sub-commands >= 0x10) to register stream
-        if (type >= 0x10) {
+        // Broadcast register responses (sub-commands >= 0x10, or 0x08 RF band ctrl) to register stream
+        if (type >= 0x10 || type == Protocol.typeRfBandCtrl) {
           _registerResponseController.add(RegisterResponse(
             subCommand: type,
             params: parts.sublist(2),
@@ -312,8 +312,8 @@ class MqttService extends TransportService {
       } else if (header == Protocol.respHeader && parts.length >= 3) {
         final type = int.parse(parts[1]);
 
-        // Broadcast register responses (sub-commands >= 0x10) to register stream
-        if (type >= 0x10) {
+        // Broadcast register responses (sub-commands >= 0x10, or 0x08 RF band ctrl) to register stream
+        if (type >= 0x10 || type == Protocol.typeRfBandCtrl) {
           _registerResponseController.add(RegisterResponse(
             subCommand: type,
             params: parts.sublist(2),
@@ -364,19 +364,35 @@ class MqttService extends TransportService {
   // ── T-Sync ACQ response handler ──────────────────────────────────────────
 
   void _handleTsyncResponse(int typeVal, List<String> parts) {
-    // Error response: 0x45 <cmd> 0xFF
-    if (parts.length >= 3 && int.tryParse(parts[2]) == Protocol.acqRespError) {
-      debugPrint('ACQ error response for cmd=0x${typeVal.toRadixString(16)}');
-      _tsyncAckController.add(TsyncAck(cmd: typeVal, isOk: false));
+    final field2 = parts.length >= 3 ? int.tryParse(parts[2]) : null;
+
+    // Negative field2 → error code (-1 internal, -2 timeout, -3 unsupported)
+    if (field2 != null && field2 < 0) {
+      debugPrint('[MQTT] ACQ error cmd=0x${typeVal.toRadixString(16)} code=$field2');
+      _tsyncAckController.add(TsyncAck(cmd: typeVal, isOk: false, params: parts));
       return;
     }
 
     switch (typeVal) {
       case Protocol.acqRun:
+        // field2==0: start notify  field2==1: completion result
+        if (field2 == 0) {
+          _tsyncAckController.add(TsyncAck(cmd: typeVal, isOk: true, params: parts));
+        } else {
+          // Always emit completion ACK so _tsyncRunning is cleared regardless of parse result
+          _tsyncAckController.add(TsyncAck(cmd: typeVal, isOk: true, params: parts));
+          final result = TsyncIterResult.fromRunTokens(parts);
+          if (result != null) _tsyncIterController.add(result);
+        }
+
       case Protocol.acqLoop:
-        // per-iteration result
-        final result = TsyncIterResult.fromTokens(parts);
-        if (result != null) _tsyncIterController.add(result);
+        // field2==0: loop start  field2==1: per-iter result  field2==2: loop end
+        if (field2 == 0 || field2 == 2) {
+          _tsyncAckController.add(TsyncAck(cmd: typeVal, isOk: true, params: parts));
+        } else {
+          final result = TsyncIterResult.fromLoopTokens(parts);
+          if (result != null) _tsyncIterController.add(result);
+        }
 
       case Protocol.acqStatus:
         final status = TsyncStatus.fromTokens(parts);
@@ -386,10 +402,13 @@ class MqttService extends TransportService {
         final result = TsyncAcqResult.fromTokens(parts);
         if (result != null) _tsyncAcqResultController.add(result);
 
+      case Protocol.acqRunOne:
+        // 0x45 0x6B <result_code>
+        _tsyncAckController.add(TsyncAck(cmd: typeVal, isOk: field2 != null && field2 >= 0, params: parts));
+
       default:
-        // ACK responses for acqInit/acqParam/acqStop/acqSetRf/acqSetPd/acqVersion/acqSaveIq
-        final isOk = parts.length >= 3 && int.tryParse(parts[2]) != Protocol.acqRespError;
-        _tsyncAckController.add(TsyncAck(cmd: typeVal, isOk: isOk, params: parts));
+        // ACK: acqInit/acqParam/acqStop/acqSetRf/acqSetPd/acqVersion/acqSaveIq
+        _tsyncAckController.add(TsyncAck(cmd: typeVal, isOk: field2 != null && field2 >= 0, params: parts));
     }
   }
 
@@ -441,6 +460,19 @@ class MqttService extends TransportService {
 
   /// 0x44 0x6A <enable> — saveiq (0=off, 1=on, 2=query)
   void sendAcqSaveIq(int enable) => sendCommand('0x44 0x6A $enable');
+  @override
+  void sendAcqRunOne() => sendCommand('0x44 0x6B');
+
+  @override
+  void sendRfBandCtrl(int path) => sendCommand('0x44 0x08 $path');
+
+  // ── PL commands (0x70-0x75) ───────────────────────────────────────────────
+  @override void sendPlInit()          => sendCommand('0x44 0x70');
+  @override void sendPllSet(int data)  => sendCommand('0x44 0x71 $data');
+  @override void sendPlStatus()        => sendCommand('0x44 0x72');
+  @override void sendPllLocked()       => sendCommand('0x44 0x73');
+  @override void sendFpgaTemp()        => sendCommand('0x44 0x74');
+  @override void sendRfPwr(int enable) => sendCommand('0x44 0x75 $enable');
 
   // ─────────────────────────────────────────────────────────────────────────
 

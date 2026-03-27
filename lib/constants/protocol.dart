@@ -18,6 +18,15 @@ class Protocol {
   static const int typeStop = 0x0F;
   static const int typeRepeatedSpectrum = 0x04;
   static const int typeStatusQuery = 0x05;
+  static const int typeRfBandCtrl = 0x08; // RF band path control (0=path0, 1=path1)
+
+  // PL command types (0x70-0x75)
+  static const int typePlInit    = 0x70; // RF_PWR ON + ADF4001 init + lock poll → 1/0
+  static const int typePllSet    = 0x71; // 24-bit latch single write            → 0
+  static const int typePlStatus  = 0x72; // PL register status dump              → 0
+  static const int typePllLocked = 0x73; // ZYNQ_CLK_LOCKED read                 → 1/0
+  static const int typeFpgaTemp  = 0x74; // TMP102 temperature (mdegC)           → <mdegC>|timeout
+  static const int typeRfPwr     = 0x75; // RF_PWR set/get                       → <0|1>
 
   // T-Sync ACQ command types (0x60-0x6A)
   static const int acqInit    = 0x60;
@@ -31,14 +40,14 @@ class Protocol {
   static const int acqSetPd   = 0x68;
   static const int acqVersion = 0x69;
   static const int acqSaveIq  = 0x6A;
+  static const int acqRunOne  = 0x6B; // single one-shot run → <result_code>
 
   // ACQ lock state values
   static const int lockUnlock   = 0;
   static const int lockLocked   = 1;
   static const int lockHoldover = 3;
 
-  // ACQ error response indicator
-  static const int acqRespError = 0xFF;
+  // ACQ error codes: negative integers (-1=internal, -2=timeout, -3=unsupported)
 
   // ACQ state machine values
   // 1=POWERON, 2=INIT, 3=TRANSIENT, 4=LOCK1, 5=LOCK2,

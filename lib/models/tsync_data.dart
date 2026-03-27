@@ -34,8 +34,58 @@ class TsyncIterResult {
     required this.fileCounter,
   }) : timestamp = DateTime.now();
 
-  /// Parse from token list.
-  /// tokens[0]="0x45", tokens[1]="98"(=0x62), tokens[2..] = fields
+  /// Parse from ACQ_RUN completion response.
+  /// Format: 0x45 0x62 1 <state> <lock> <pci> <beam> <crc> [corr] [curDac] [fileSaved] [fileCounter]
+  /// tokens[2]="1", tokens[3]=state, tokens[4]=lock, tokens[5]=pci, tokens[6]=beam, tokens[7]=crc
+  static TsyncIterResult? fromRunTokens(List<String> tokens) {
+    if (tokens.length < 8) return null;
+    try {
+      return TsyncIterResult(
+        iter:        1,
+        total:       1,
+        state:       int.parse(tokens[3]),
+        lock:        int.parse(tokens[4]),
+        ssbLock:     0,
+        pci:         int.parse(tokens[5]),
+        beam:        int.parse(tokens[6]),
+        crc:         int.parse(tokens[7]),
+        corr:        tokens.length > 8  ? (int.tryParse(tokens[8])  ?? 0) : 0,
+        curDac:      tokens.length > 9  ? (int.tryParse(tokens[9])  ?? 0) : 0,
+        fileSaved:   tokens.length > 10 ? (int.tryParse(tokens[10]) ?? 0) : 0,
+        fileCounter: tokens.length > 11 ? (int.tryParse(tokens[11]) ?? 0) : 0,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Parse from ACQ_LOOP per-iteration response.
+  /// Format: 0x45 0x65 1 <iter> <state> <lock> <pci> <beam> <crc> [corr] [curDac] [fileSaved] [fileCounter]
+  /// tokens[2]="1", tokens[3]=iter, tokens[4]=state, tokens[5]=lock, tokens[6]=pci, tokens[7]=beam, tokens[8]=crc
+  static TsyncIterResult? fromLoopTokens(List<String> tokens) {
+    if (tokens.length < 9) return null;
+    try {
+      return TsyncIterResult(
+        iter:        int.parse(tokens[3]),
+        total:       0,
+        state:       int.parse(tokens[4]),
+        lock:        int.parse(tokens[5]),
+        ssbLock:     0,
+        pci:         int.parse(tokens[6]),
+        beam:        int.parse(tokens[7]),
+        crc:         int.parse(tokens[8]),
+        corr:        tokens.length > 9  ? (int.tryParse(tokens[9])  ?? 0) : 0,
+        curDac:      tokens.length > 10 ? (int.tryParse(tokens[10]) ?? 0) : 0,
+        fileSaved:   tokens.length > 11 ? (int.tryParse(tokens[11]) ?? 0) : 0,
+        fileCounter: tokens.length > 12 ? (int.tryParse(tokens[12]) ?? 0) : 0,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Legacy parser — rich format with 12 data fields (tokens[2..13]).
+  /// Kept for backward compatibility if firmware sends extended format.
   static TsyncIterResult? fromTokens(List<String> tokens) {
     if (tokens.length < 14) return null;
     try {

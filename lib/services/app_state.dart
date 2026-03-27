@@ -39,6 +39,7 @@ class AppState extends ChangeNotifier {
   int _iqByteSize = 16384; // IQ capture byte size (4 bytes per I/Q pair)
   bool _markerEnabled = true;
   bool _tsyncSaveCsv = true;
+  int _rfPath = 1; // RF band path (0 or 1); sent on init and on manual change
 
   // ── T-Sync ACQ parameters ─────────────────────────────────────────────────
   int _tsyncMode       = 0;       // ACQ_PARAM mode
@@ -82,6 +83,7 @@ class AppState extends ChangeNotifier {
   StreamSubscription? _tsyncIterSubscription;
   StreamSubscription? _tsyncStatusSubscription;
   StreamSubscription? _tsyncAcqResultSubscription;
+  StreamSubscription? _tsyncAckSubscription;
 
   // Queue for throttling spectrum updates during repeated measurements
   final Queue<Uint8List> _spectrumDataQueue = Queue<Uint8List>();
@@ -108,6 +110,7 @@ class AppState extends ChangeNotifier {
   int get iqByteSize => _iqByteSize;
   bool get markerEnabled => _markerEnabled;
   bool get tsyncSaveCsv => _tsyncSaveCsv;
+  int  get rfPath        => _rfPath;
 
   // T-Sync getters
   int  get tsyncMode        => _tsyncMode;
@@ -169,6 +172,15 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Update RF band path and immediately send to device if connected.
+  void setRfPath(int path, {bool sendNow = true}) {
+    _rfPath = path;
+    notifyListeners();
+    if (sendNow && mqttService.isConnected) {
+      mqttService.sendRfBandCtrl(path);
+    }
+  }
+
   set tsyncMode(int v)      { _tsyncMode = v;      notifyListeners(); }
   set tsyncSamples(int v)   { _tsyncSamples = v;   notifyListeners(); }
   set tsyncHoTime(int v)    { _tsyncHoTime = v;    notifyListeners(); }
@@ -224,12 +236,14 @@ class AppState extends ChangeNotifier {
     _tsyncIterSubscription?.cancel();
     _tsyncStatusSubscription?.cancel();
     _tsyncAcqResultSubscription?.cancel();
+    _tsyncAckSubscription?.cancel();
     _responseSubscription = null;
     _spectrumSubscription = null;
     _iqSubscription = null;
     _tsyncIterSubscription = null;
     _tsyncStatusSubscription = null;
     _tsyncAcqResultSubscription = null;
+    _tsyncAckSubscription = null;
   }
 
   /// Re-subscribe when the active transport changes.
@@ -248,6 +262,7 @@ class AppState extends ChangeNotifier {
     _tsyncIterSubscription = mqttService.tsyncIterStream.listen(_handleTsyncIter);
     _tsyncStatusSubscription = mqttService.tsyncStatusStream.listen(_handleTsyncStatus);
     _tsyncAcqResultSubscription = mqttService.tsyncAcqResultStream.listen(_handleTsyncAcqResult);
+    _tsyncAckSubscription = mqttService.tsyncAckStream.listen(_handleTsyncAck);
   }
 
   void _startUpdateTimer() {
@@ -453,9 +468,10 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Initialize AD9361 61.44MHz mode
+  /// Initialize AD9361 61.44MHz mode, then apply the current RF band path.
   void initialize() {
     mqttService.sendInitCommand();
+    mqttService.sendRfBandCtrl(_rfPath);
   }
 
   /// Request single FFT spectrum measurement
@@ -562,6 +578,24 @@ class AppState extends ChangeNotifier {
   void _handleTsyncAcqResult(TsyncAcqResult result) {
     _tsyncLastResult = result;
     notifyListeners();
+  }
+
+  void _handleTsyncAck(TsyncAck ack) {
+    final field2 = ack.params.length >= 3 ? int.tryParse(ack.params[2]) : null;
+
+    if (ack.cmd == Protocol.acqRun) {
+      // field2==1: run completion (or error)
+      if (field2 == 1 || !ack.isOk) {
+        _tsyncRunning = false;
+        notifyListeners();
+      }
+    } else if (ack.cmd == Protocol.acqLoop) {
+      // field2==2: loop ended naturally (count reached), or error
+      if (field2 == 2 || !ack.isOk) {
+        _tsyncLooping = false;
+        notifyListeners();
+      }
+    }
   }
 
   void _triggerFtpDownload(int fileCounter) async {

@@ -57,6 +57,34 @@ class _ControlPanelState extends State<ControlPanel> {
   Timer? _statusTimeoutTimer;
   bool _isLoadingDialogOpen = false;
 
+  // PLL Init state
+  bool? _pllInitResult;   // null=not tried, true=success, false=failed
+  bool _pllInitPending = false;
+  StreamSubscription? _pllInitSubscription;
+
+
+  void _sendPlInit(TransportService transport) {
+    if (_pllInitPending) return;
+    _pllInitSubscription?.cancel();
+    setState(() {
+      _pllInitPending = true;
+      _pllInitResult = null;
+    });
+    transport.sendPlInit();
+    _pllInitSubscription = transport.registerResponseStream
+        .where((r) => r.subCommand == Protocol.typePlInit)
+        .listen((r) {
+          if (!mounted) return;
+          final val = int.tryParse(r.params.isNotEmpty ? r.params[0] : '');
+          setState(() {
+            _pllInitResult = val == 1;
+            _pllInitPending = false;
+          });
+          _pllInitSubscription?.cancel();
+          _pllInitSubscription = null;
+        });
+  }
+
   @override
   void dispose() {
     _ipController.dispose();
@@ -73,6 +101,7 @@ class _ControlPanelState extends State<ControlPanel> {
     _tsyncDelayMsController.dispose();
     _statusSubscription?.cancel();
     _statusTimeoutTimer?.cancel();
+    _pllInitSubscription?.cancel();
     super.dispose();
   }
 
@@ -181,6 +210,9 @@ class _ControlPanelState extends State<ControlPanel> {
                     children: [
                       _buildLabel('Frequency'),
                       _buildFrequencyInput(appState),
+                      const SizedBox(height: 6),
+                      _buildLabel('RF Path'),
+                      _buildRfPathDropdown(appState, mqtt),
                     ],
                   ),
                 ),
@@ -712,7 +744,65 @@ class _ControlPanelState extends State<ControlPanel> {
 
     return Column(
       children: [
-        // Init button
+        // PLL Init button
+        SizedBox(
+          height: 32,
+          width: double.infinity,
+          child: OutlinedButton(
+            onPressed: mqtt.isConnected && !_pllInitPending
+                ? () => _sendPlInit(mqtt)
+                : null,
+            style: OutlinedButton.styleFrom(
+              foregroundColor: _pllInitResult == null
+                  ? Colors.blueGrey[700]
+                  : _pllInitResult!
+                      ? Colors.green[700]
+                      : Colors.red[700],
+              side: BorderSide(
+                color: _pllInitResult == null
+                    ? Colors.blueGrey[400]!
+                    : _pllInitResult!
+                        ? Colors.green[600]!
+                        : Colors.red[600]!,
+                width: 1.5,
+              ),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (_pllInitPending)
+                  SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(strokeWidth: 1.5, color: Colors.blueGrey[400]),
+                  )
+                else
+                  Icon(
+                    _pllInitResult == null
+                        ? Icons.settings_input_antenna
+                        : _pllInitResult!
+                            ? Icons.check_circle
+                            : Icons.cancel,
+                    size: 14,
+                  ),
+                const SizedBox(width: 4),
+                Text(
+                  _pllInitPending
+                      ? 'PLL Init...'
+                      : _pllInitResult == null
+                          ? 'PLL Init'
+                          : _pllInitResult!
+                              ? 'PLL Locked'
+                              : 'PLL Failed',
+                  style: const TextStyle(fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 4),
+        // AD9361 Init button
         SizedBox(
           height: 32,
           width: double.infinity,
@@ -930,6 +1020,35 @@ class _ControlPanelState extends State<ControlPanel> {
         const SizedBox(width: 4),
         const Text('MHz', style: TextStyle(fontSize: 12)),
       ],
+    );
+  }
+
+  Widget _buildRfPathDropdown(AppState appState, TransportService transport) {
+    return Container(
+      height: 28,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: Colors.grey[400]!),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<int>(
+          value: appState.rfPath,
+          isDense: true,
+          style: const TextStyle(fontSize: 12, color: Colors.black87),
+          items: const [
+            DropdownMenuItem(value: 0, child: Text('Path 0')),
+            DropdownMenuItem(value: 1, child: Text('Path 1')),
+          ],
+          onChanged: transport.isConnected
+              ? (val) {
+                  if (val == null) return;
+                  appState.setRfPath(val);
+                }
+              : null,
+        ),
+      ),
     );
   }
 

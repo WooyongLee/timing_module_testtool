@@ -259,6 +259,9 @@ class _ResultRow extends StatelessWidget {
         '${ts.second.toString().padLeft(2, '0')}.'
         '${ts.millisecond.toString().padLeft(3, '0')}';
 
+    // acqRun single-shot (total==1): ssbLock / corr / curDac not provided by spec
+    final hasExtFields = r.total != 1;
+
     return Container(
       color: isEven ? const Color(0xFF222222) : const Color(0xFF1E1E1E),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -267,13 +270,16 @@ class _ResultRow extends StatelessWidget {
           _cell(tsStr, flex: 3),
           _cell('${r.iter}'),
           _cell(r.stateName, color: _stateColor(r.state)),
-          _cell(r.lockName,    color: lockColor),
-          _cell(r.ssbLockName, color: lockColor),
+          _cell(r.lockName,  color: lockColor),
+          _cell(hasExtFields ? r.ssbLockName : '-',
+                color: hasExtFields ? lockColor : Colors.white38),
           _cell(r.pci == -1 ? '-' : '${r.pci}'),
           _cell('${r.beam}'),
           _cell(r.crcOk ? 'OK' : 'FAIL', color: crcColor),
-          _cell('${r.corr}'),
-          _cell('${r.curDac}'),
+          _cell(hasExtFields ? '${r.corr}'   : '-',
+                color: hasExtFields ? null : Colors.white38),
+          _cell(hasExtFields ? '${r.curDac}' : '-',
+                color: hasExtFields ? null : Colors.white38),
         ],
       ),
     );
