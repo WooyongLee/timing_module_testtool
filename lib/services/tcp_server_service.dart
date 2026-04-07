@@ -133,14 +133,23 @@ class TcpServerService extends TransportService {
   }
 
   void _onClientConnected(Socket client) {
-    // Drop any existing client
-    _clientSubscription?.cancel();
-    _clientSocket?.destroy();
+    // Save references to old connection before overwriting
+    final oldSocket = _clientSocket;
+    final oldSubscription = _clientSubscription;
 
+    // Update state BEFORE tearing down old socket to prevent the old
+    // onDone callback from accidentally destroying the new connection.
     _clientSocket = client;
     _clientIp = client.remoteAddress.address;
     _recvBuffer.clear();
+    _pendingDataType = -1;
+    _isInitialized = false;
 
+    // Disable Nagle's algorithm so commands are sent to the device immediately
+    // without waiting to coalesce with subsequent packets.
+    client.setOption(SocketOption.tcpNoDelay, true);
+
+    debugPrint('[TCP] Client connected: $_clientIp:${client.remotePort}');
     _connectionState = ConnectionState.connected;
     _addLog(MqttLogEntry(
       direction: 'SYS',
@@ -148,22 +157,37 @@ class TcpServerService extends TransportService {
       message: 'Device connected from $_clientIp',
     ));
 
+    // Attach listener with a closure that captures this specific socket,
+    // so a stale onDone/onError from a previous connection cannot affect
+    // the newly established one.
     _clientSubscription = client.listen(
       _onData,
       onError: (e) {
         debugPrint('[TCP] client error: $e');
-        _onClientDisconnected();
+        _onClientDisconnected(client);
       },
-      onDone: _onClientDisconnected,
+      onDone: () => _onClientDisconnected(client),
     );
+
+    // Now tear down old connection (must be after new subscription is set)
+    oldSubscription?.cancel();
+    oldSocket?.destroy();
   }
 
-  void _onClientDisconnected() {
+  void _onClientDisconnected(Socket whichClient) {
+    // Guard: ignore stale callbacks from a previous connection
+    if (_clientSocket != whichClient) {
+      debugPrint('[TCP] Stale disconnect ignored (already replaced by new client)');
+      return;
+    }
+    debugPrint('[TCP] Client disconnected: $_clientIp');
+
     _clientSocket?.destroy();
     _clientSocket = null;
     _clientSubscription?.cancel();
     _clientSubscription = null;
     _recvBuffer.clear();
+    _pendingDataType = -1;
     _isInitialized = false;
 
     // Stay in connecting state (still listening) if server socket is alive.
@@ -206,23 +230,45 @@ class TcpServerService extends TransportService {
   }
 
   void _parseFrames() {
-    while (_recvBuffer.length >= _headerSize) {
-      final buf = Uint8List.fromList(_recvBuffer);
-      final view = ByteData.sublistView(buf);
+    const int maxPayloadLength = 10 * 1024 * 1024; // 예: 최대 10MB 제한
 
-      // Check magic (little-endian uint32)
-      final magic = view.getUint32(0, Endian.little);
+    while (_recvBuffer.length >= _headerSize) {
+      // Magic Byte 확인 로직을 List<int>에서 효율적으로 처리
+      final magic = _recvBuffer[0] | (_recvBuffer[1] << 8) | (_recvBuffer[2] << 16) | (_recvBuffer[3] << 24);
+
       if (magic != _magic) {
-        // Out of sync — discard one byte and retry
-        _recvBuffer.removeAt(0);
+        // 1. 비효율적인 removeAt(0) 대신, 다음 Magic Byte를 찾아서 통째로 건너뜀
+        int syncIndex = -1;
+        for (int i = 1; i <= _recvBuffer.length - 4; i++) {
+          final nextMagic = _recvBuffer[i] | (_recvBuffer[i+1] << 8) | (_recvBuffer[i+2] << 16) | (_recvBuffer[i+3] << 24);
+          if (nextMagic == _magic) {
+            syncIndex = i;
+            break;
+          }
+        }
+
+        if (syncIndex != -1) {
+          _recvBuffer.removeRange(0, syncIndex); // 한 번에 잘라냄 (성능 향상)
+        } else {
+          _recvBuffer.clear(); // Magic이 없으면 다 지움
+          break;
+        }
         continue;
       }
 
-      final type   = buf[4];
-      // pad: bytes 5,6,7 — ignored
-      final length = view.getUint32(8, Endian.little);
+      final type   = _recvBuffer[4];
+      final length = _recvBuffer[8] | (_recvBuffer[9] << 8) | (_recvBuffer[10] << 16) | (_recvBuffer[11] << 24);
 
-      if (_recvBuffer.length < _headerSize + length) break; // wait for more bytes
+      // 2. 비정상적인 Length 방어 로직
+      if (length > maxPayloadLength || length < 0) {
+        debugPrint('[TCP] ERROR: Invalid payload length: $length. Clearing buffer.');
+        _recvBuffer.clear();
+        // 심각한 패킷 오염이므로 소켓 연결을 아예 끊고 재접속을 유도하는 것이 안전할 수 있습니다.
+        // _clientSocket?.destroy();
+        break; 
+      }
+
+      if (_recvBuffer.length < _headerSize + length) break; // 데이터가 다 올 때까지 정상 대기
 
       final payload = Uint8List.fromList(
         _recvBuffer.sublist(_headerSize, _headerSize + length),
